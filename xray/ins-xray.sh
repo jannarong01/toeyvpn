@@ -1,19 +1,52 @@
 #!/bin/bash
+# =========================================
+#  XRAY CORE & NGINX SSL (PORT 80 / 443)
+# =========================================
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
+RED='\033[0;31m'
 NC='\033[0m'
 
-DOMAIN=$(cat /etc/xray/domain 2>/dev/null || curl -sS ipv4.icanhazip.com)
+MYIP=$(curl -sS ipv4.icanhazip.com)
+DOMAIN=$(cat /etc/xray/domain 2>/dev/null || echo "$MYIP")
 
-# 1. ติดตั้ง Xray Core จาก Official
+# 1. ติดตั้งแพ็กเกจที่จำเป็นและ Xray Core
+apt-get update -y
+apt-get install -y socat openssl cron jq curl
 echo -e "${CYAN}กำลังดาวน์โหลดและติดตั้ง Xray Core...${NC}"
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 2. สุ่มค่า UUID สำหรับใช้งานเริ่มต้น
-UUID=$(cat /proc/sys/kernel/random/uuid)
 mkdir -p /etc/xray
 
-# 3. สร้างไฟล์ตั้งค่า /etc/xray/config.json (ครอบด้วย EOF ป้องกัน Error)
+# 2. ระบบขอใบรับรอง SSL (Let's Encrypt หรือ Self-Signed Fallback)
+systemctl stop nginx >/dev/null 2>&1
+
+if [[ "$DOMAIN" != "$MYIP" ]]; then
+    echo -e "${CYAN}กำลังขอใบรับรอง SSL (Let's Encrypt) สำหรับโดเมน ${DOMAIN}...${NC}"
+    curl https://get.acme.sh | sh -s email=admin@${DOMAIN}
+    /root/.acme.sh/acme.sh --upgrade --auto-upgrade
+    /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+    /root/.acme.sh/acme.sh --issue -d "${DOMAIN}" --standalone -k ec-256 --force
+    /root/.acme.sh/acme.sh --installcert -d "${DOMAIN}" \
+        --fullchainpath /etc/xray/xray.crt \
+        --keypath /etc/xray/xray.key --ecc
+fi
+
+# หากไม่มีโดเมน หรือขอ Let's Encrypt ไม่ผ่าน ให้สร้าง Self-Signed Certificate แทนเพื่อป้องกัน Nginx ล่ม
+if [[ ! -s /etc/xray/xray.crt || ! -s /etc/xray/xray.key ]]; then
+    echo -e "${YELLOW}สร้างใบรับรอง SSL จำลอง (Self-Signed) สำหรับพอร์ต 443...${NC}"
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/xray/xray.key \
+        -out /etc/xray/xray.crt \
+        -subj "/C=TH/ST=Bangkok/L=Bangkok/O=PrivateVPN/CN=${DOMAIN}" >/dev/null 2>&1
+fi
+
+chmod 644 /etc/xray/xray.crt /etc/xray/xray.key
+
+# 3. สร้างไฟล์ตั้งค่า /etc/xray/config.json
+UUID=$(cat /proc/sys/kernel/random/uuid)
+
 cat <<EOF > /etc/xray/config.json
 {
   "log": {
@@ -30,7 +63,8 @@ cat <<EOF > /etc/xray/config.json
         "clients": [
           {
             "id": "${UUID}",
-            "alterId": 0
+            "alterId": 0,
+            "email": "default"
           }
         ]
       },
@@ -48,7 +82,8 @@ cat <<EOF > /etc/xray/config.json
       "settings": {
         "clients": [
           {
-            "id": "${UUID}"
+            "id": "${UUID}",
+            "email": "default"
           }
         ],
         "decryption": "none"
@@ -69,13 +104,14 @@ cat <<EOF > /etc/xray/config.json
 }
 EOF
 
-# 4. บันทึกข้อมูล Client ไว้ดูผ่านคำสั่ง menu
+# 4. บันทึกข้อมูลบัญชีเริ่มต้น
 cat <<EOF > /etc/xray/client-info.txt
 =========================================
          ข้อมูลบัญชีเริ่มต้น Xray Core
 =========================================
 Host / Domain : ${DOMAIN}
-Port          : 80
+Port HTTP     : 80
+Port SSL/TLS  : 443
 UUID          : ${UUID}
 Network       : WebSocket (ws)
 Path Vmess    : /vmess
@@ -83,7 +119,7 @@ Path Vless    : /vless
 =========================================
 EOF
 
-# 5. ตั้งค่า Nginx Reverse Proxy ให้แชร์พอร์ต 80 ร่วมกัน
+# 5. ตั้งค่า Nginx Reverse Proxy ให้รับทั้งพอร์ต 80 และ 443
 rm -f /etc/nginx/sites-enabled/default
 rm -f /etc/nginx/conf.d/*.conf
 
@@ -91,9 +127,15 @@ cat << 'EOF' > /etc/nginx/conf.d/vpn.conf
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
+    listen 443 ssl http2 default_server;
+    listen [::]:443 ssl http2 default_server;
     server_name _;
 
-    # ส่งต่อ Path /vmess ไปยัง Xray พอร์ต 10001
+    ssl_certificate /etc/xray/xray.crt;
+    ssl_certificate_key /etc/xray/xray.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
     location /vmess {
         proxy_redirect off;
         proxy_pass http://127.0.0.1:10001;
@@ -105,7 +147,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
-    # ส่งต่อ Path /vless ไปยัง Xray พอร์ต 10002
     location /vless {
         proxy_redirect off;
         proxy_pass http://127.0.0.1:10002;
@@ -117,7 +158,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
-    # ส่งต่อ Path อื่นๆ ทั้งหมดไปยัง SSH WebSocket พอร์ต 10015
     location / {
         proxy_redirect off;
         proxy_pass http://127.0.0.1:10015;
@@ -131,8 +171,8 @@ server {
 }
 EOF
 
-systemctl enable xray
+systemctl enable xray >/dev/null 2>&1
 systemctl restart xray
-systemctl enable nginx
+systemctl enable nginx >/dev/null 2>&1
 systemctl restart nginx
-echo -e "${GREEN}Xray & Nginx Reverse Proxy Installed Successfully!${NC}"
+echo -e "${GREEN}Xray & Nginx SSL (Port 80/443) Installed Successfully!${NC}"
