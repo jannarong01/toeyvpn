@@ -1,6 +1,6 @@
 #!/bin/bash
 # =========================================
-#  SSH, DROPBEAR, BADVPN & FULL MENU
+#  SSH, DROPBEAR, BADVPN, MENU & AUTO-KILL
 # =========================================
 export DEBIAN_FRONTEND=noninteractive
 
@@ -15,7 +15,7 @@ ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
 
 # 3. ติดตั้งแพ็กเกจหลัก
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat
+apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron
 
 # 4. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
 echo "กำลังติดตั้ง BadVPN UDPGW..."
@@ -79,7 +79,47 @@ EOF
 systemctl enable dropbear >/dev/null 2>&1
 systemctl restart dropbear
 
-# 6. สร้างคำสั่งเช็กสถานะ 'running'
+# 6. สร้างสคริปต์ลบบัญชีหมดอายุอัตโนมัติ (Auto-Delete)
+cat << 'EOF' > /usr/bin/xp
+#!/bin/bash
+export LC_ALL=en_US.UTF-8
+today=$(date +%Y-%m-%d)
+today_sec=$(date -d "$today" +%s)
+
+# 1. เช็กและลบ SSH ที่หมดอายุ
+for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
+    exp_date=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
+    if [[ "$exp_date" != "never" && -n "$exp_date" ]]; then
+        exp_sec=$(date -d "$exp_date" +%s)
+        if [[ $today_sec -ge $exp_sec ]]; then
+            userdel -f "$user"
+            echo "Deleted Expired SSH Account: $user"
+        fi
+    fi
+done
+
+# 2. เช็กและลบ Xray ที่หมดอายุ
+if [ -f /etc/xray/xray-exp.txt ]; then
+    while IFS=':' read -r x_user x_exp; do
+        exp_sec=$(date -d "$x_exp" +%s)
+        if [[ $today_sec -ge $exp_sec ]]; then
+            jq --arg u "$x_user" \
+               '(.inbounds[0].settings.clients) |= map(select(.email != $u)) |
+                (.inbounds[1].settings.clients) |= map(select(.email != $u))' \
+               /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
+            sed -i "/^$x_user:/d" /etc/xray/xray-exp.txt
+            systemctl restart xray
+            echo "Deleted Expired Xray Account: $x_user"
+        fi
+    done < /etc/xray/xray-exp.txt
+fi
+EOF
+chmod +x /usr/bin/xp
+
+# ตั้งค่า Cron ให้รันสคริปต์ xp ทุกๆ เที่ยงคืน (00:00)
+(crontab -l 2>/dev/null | grep -v "/usr/bin/xp"; echo "0 0 * * * /usr/bin/xp") | crontab -
+
+# 7. สร้างคำสั่งเช็กสถานะ 'running'
 cat << 'EOF' > /usr/bin/running
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -106,12 +146,12 @@ echo -e " Nginx Proxy (80 / 443)   : $(check_status nginx)"
 echo -e " Xray Core (Vmess/Vless)  : $(check_status xray)"
 echo -e " SSH WebSocket (10015)    : $(check_status ws-epro)"
 echo -e " BadVPN UDPGW (7300)      : $(check_status udpgw@7300)"
-echo -e " Vnstat Service           : $(check_status vnstat)"
+echo -e " Cron Auto-Delete (xp)    : $(check_status cron)"
 echo -e "${YELLOW}=========================================${NC}"
 EOF
 chmod +x /usr/bin/running
 
-# 7. สร้างคำสั่งหน้าหลัก 'menu' พร้อมระบบจัดการ Xray และ SSL
+# 8. สร้างคำสั่งหน้าหลัก 'menu'
 cat << 'EOF' > /usr/bin/menu
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -122,6 +162,7 @@ NC='\033[0m'
 
 MYIP=$(curl -sS ipv4.icanhazip.com)
 DOMAIN=$(cat /etc/xray/domain 2>/dev/null || echo "$MYIP")
+touch /etc/xray/xray-exp.txt
 
 clear
 echo -e "${YELLOW}☉———————————————————————————————☉${NC}"
@@ -132,14 +173,15 @@ echo -e " Domain     : ${GREEN}${DOMAIN}${NC}"
 echo -e "${YELLOW}☉———————————————————————————————☉${NC}"
 echo -e " [1] สร้างบัญชี SSH / WebSocket"
 echo -e " [2] สร้างบัญชี Xray (Vmess & Vless)"
-echo -e " [3] ลบบัญชี Xray (Vmess & Vless)"
-echo -e " [4] ดูบัญชี Xray ทั้งหมด"
+echo -e " [3] ลบบบัญชี Xray (Vmess & Vless)"
+echo -e " [4] ดูบัญชี Xray ทั้งหมด (พร้อมวันหมดอายุ)"
 echo -e " [5] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
 echo -e " [6] เช็กสถานะบริการทั้งหมด (running)"
 echo -e " [7] รีสตาร์ทบริการทั้งหมด"
+echo -e " [8] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะ)"
 echo -e " [0] ออกจากเมนู"
 echo -e "${YELLOW}☉———————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-7]: " opt
+read -rp "เลือกเมนู [0-8]: " opt
 
 case $opt in
     1)
@@ -177,17 +219,18 @@ case $opt in
             echo -e "${RED}มีชื่อบัญชีนี้อยู่ในระบบแล้ว!${NC}"
             exit 1
         fi
+        read -rp "จำนวนวันที่ใช้งาน (เช่น 30): " days
+        exp=$(date -d "$days days" +"%Y-%m-%d")
         UUID=$(cat /proc/sys/kernel/random/uuid)
 
-        # เพิ่มบัญชีลงใน config.json ด้วย jq
+        # เพิ่มบัญชีและบันทึกวันหมดอายุ
         jq --arg u "$user" --arg id "$UUID" \
            '.inbounds[0].settings.clients += [{"id": $id, "alterId": 0, "email": $u}] |
             .inbounds[1].settings.clients += [{"id": $id, "email": $u}]' \
            /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
-
+        echo "$user:$exp" >> /etc/xray/xray-exp.txt
         systemctl restart xray
 
-        # สร้างลิงก์ Vmess (80 และ 443)
         VMESS_TLS=$(cat <<JSON | base64 -w 0
 {"v":"2","ps":"${user}-TLS","add":"${DOMAIN}","port":"443","id":"${UUID}","aid":"0","net":"ws","path":"/vmess","type":"none","host":"${DOMAIN}","tls":"tls"}
 JSON
@@ -205,20 +248,12 @@ JSON
         echo -e "Host / Domain : ${GREEN}${DOMAIN}${NC}"
         echo -e "Port TLS/HTTP : 443 / 80"
         echo -e "UUID          : ${GREEN}${UUID}${NC}"
-        echo -e "Path Vmess    : /vmess"
-        echo -e "Path Vless    : /vless"
+        echo -e "หมดอายุวันที่     : ${GREEN}${exp} (${days} วัน)${NC}"
         echo -e "${YELLOW}-------------------------------------------${NC}"
         echo -e "${CYAN}[ลิงก์ Vmess SSL/TLS (Port 443)]${NC}"
-        echo -e "vmess://${VMESS_TLS}"
-        echo -e ""
-        echo -e "${CYAN}[ลิงก์ Vmess HTTP (Port 80)]${NC}"
-        echo -e "vmess://${VMESS_NTLS}"
-        echo -e ""
+        echo -e "vmess://${VMESS_TLS}\n"
         echo -e "${CYAN}[ลิงก์ Vless SSL/TLS (Port 443)]${NC}"
-        echo -e "${VLESS_TLS}"
-        echo -e ""
-        echo -e "${CYAN}[ลิงก์ Vless HTTP (Port 80)]${NC}"
-        echo -e "${VLESS_NTLS}"
+        echo -e "${VLESS_TLS}\n"
         echo -e "${YELLOW}===========================================${NC}"
         ;;
     3)
@@ -234,14 +269,24 @@ JSON
            '(.inbounds[0].settings.clients) |= map(select(.email != $u)) |
             (.inbounds[1].settings.clients) |= map(select(.email != $u))' \
            /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
+        sed -i "/^$deluser:/d" /etc/xray/xray-exp.txt
         systemctl restart xray
         echo -e "${GREEN}ลบบัญชี ${deluser} เรียบร้อยแล้ว!${NC}"
         ;;
     4)
         clear
-        echo -e "${YELLOW}=== รายชื่อบัญชี Xray ทั้งหมดในระบบ ===${NC}"
-        jq -r '.inbounds[0].settings.clients[] | "ชื่อบัญชี: \(.email) | UUID: \(.id)"' /etc/xray/config.json
-        echo -e "${YELLOW}====================================${NC}"
+        echo -e "${YELLOW}========= รายชื่อบัญชี Xray ทั้งหมด =========${NC}"
+        printf "%-15s %-15s %s\n" "Username" "Expire Date" "UUID"
+        echo -e "---------------------------------------------------"
+        if [ -s /etc/xray/xray-exp.txt ]; then
+            while IFS=':' read -r u exp; do
+                uuid=$(jq -r --arg usr "$u" '.inbounds[0].settings.clients[] | select(.email == $usr) | .id' /etc/xray/config.json)
+                printf "%-15s %-15s %s\n" "$u" "$exp" "$uuid"
+            done < /etc/xray/xray-exp.txt
+        else
+            echo "ยังไม่มีการสร้างบัญชี Xray ในระบบ"
+        fi
+        echo -e "${YELLOW}===========================================${NC}"
         ;;
     5)
         read -rp "กรอกโดเมนใหม่ของคุณ (ชี้ IP มายังเซิร์ฟเวอร์นี้แล้ว): " newdom
@@ -265,8 +310,13 @@ JSON
         running
         ;;
     7)
-        systemctl restart ssh dropbear nginx xray ws-epro udpgw@7100 udpgw@7200 udpgw@7300 vnstat
+        systemctl restart ssh dropbear nginx xray ws-epro udpgw@7100 udpgw@7200 udpgw@7300 cron
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
+        ;;
+    8)
+        echo -e "${CYAN}กำลังสแกนหาและลบบัญชีที่หมดอายุ...${NC}"
+        /usr/bin/xp
+        echo -e "${GREEN}เคลียร์บัญชีหมดอายุเสร็จสิ้น!${NC}"
         ;;
     0)
         exit 0
@@ -278,4 +328,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "SSH, VPN & Full Menu Installed Successfully!"
+echo "SSH, VPN, Full Menu & Auto-Kill Installed Successfully!"
