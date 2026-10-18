@@ -46,5 +46,7 @@ apt-get update -y
 apt-get install -y wget curl jq zip unzip tar socat cron net-tools
 
 # ลำดับต่อไป: เรียกไฟล์ติดตั้งโมดูลต่างๆ จาก GitHub ของเรา
-# wget -q https://raw.githubusercontent.com/ชื่อผู้ใช้ของคุณ/ชื่อโปรเจกต์/main/install/ssh-vpn.sh && chmod +x ssh-vpn.sh && ./ssh-vpn.sh
-# wget -q https://raw.githubusercontent.com/ชื่อผู้ใช้ของคุณ/ชื่อโปรเจกต์/main/install/ins-xray.sh && chmod +x ins-xray.sh && ./ins-xray.sh
+
+wget -q https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh && chmod +x ssh-vpn.sh && ./ssh-vpn.sh
+wget -q https://raw.githubusercontent.com/jannarong01/toeyvpn/main/xray/ins-xray.sh && chmod +x ins-xray.sh && ./ins-xray.sh
+wget -q https://raw.githubusercontent.com/jannarong01/toeyvpn/main/websocket/edu.sh && chmod +x edu.sh && ./edu.sh
