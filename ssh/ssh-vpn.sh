@@ -1,6 +1,6 @@
 #!/bin/bash
 # =========================================
-#  SSH, DROPBEAR, NGINX & BADVPN INSTALLER
+#  SSH, DROPBEAR, BADVPN & FULL MENU
 # =========================================
 export DEBIAN_FRONTEND=noninteractive
 
@@ -15,18 +15,16 @@ ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
 
 # 3. ติดตั้งแพ็กเกจหลัก
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools
+apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat
 
 # 4. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
 echo "กำลังติดตั้ง BadVPN UDPGW..."
 wget -q -O /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
 
-# หากลิงก์แรกโหลดไม่ผ่านหรือไฟล์มีขนาด 0 byte ให้ลองลิงก์สำรอง
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
     wget -q -O /usr/local/bin/badvpn-udpgw "https://github.com/ambrop72/badvpn/raw/master/badvpn-udpgw64"
 fi
 
-# หากยังโหลดไฟล์ Binary ไม่ได้อีก ให้ทำการ Compile เองพร้อมไลบรารีที่จำเป็นครบชุด
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
     apt-get install -y cmake build-essential git libnspr4-dev libnss3-dev pkg-config
     git clone https://github.com/ambrop72/badvpn.git /tmp/badvpn
@@ -40,7 +38,6 @@ fi
 
 chmod +x /usr/local/bin/badvpn-udpgw
 
-# สร้าง Systemd Service สำหรับรัน UDPGW หลายพอร์ต
 cat <<EOF > /etc/systemd/system/udpgw@.service
 [Unit]
 Description=BadVPN UDPGW Service on Port %i
@@ -72,11 +69,9 @@ DROPBEAR_BANNER="/etc/issue.net"
 DROPBEAR_RECEIVE_WINDOW=65536
 EOF
 
-# เพิ่ม Shell ที่อนุญาตสำหรับบัญชี VPN (ไม่ให้เข้าหน้า Terminal ได้)
 grep -qxF '/bin/false' /etc/shells || echo "/bin/false" >> /etc/shells
 grep -qxF '/usr/sbin/nologin' /etc/shells || echo "/usr/sbin/nologin" >> /etc/shells
 
-# สร้าง Banner ต้อนรับเวลาเชื่อมต่อ SSH
 cat <<EOF > /etc/issue.net
 <p style="text-align:center"><b>=== PRIVATE VPN SERVER ===</b></p>
 EOF
@@ -105,18 +100,18 @@ clear
 echo -e "${YELLOW}=========================================${NC}"
 echo -e "           ${CYAN}STATUS RUNNING SERVICE${NC}"
 echo -e "${YELLOW}=========================================${NC}"
-echo -e " OpenSSH Service        : $(check_status ssh)"
-echo -e " Dropbear Service       : $(check_status dropbear)"
-echo -e " Nginx Reverse Proxy    : $(check_status nginx)"
-echo -e " Xray Core (Vmess/Vless): $(check_status xray)"
-echo -e " SSH WebSocket (10015)  : $(check_status ws-epro)"
-echo -e " BadVPN UDPGW (7300)    : $(check_status udpgw@7300)"
-echo -e " Vnstat Service         : $(check_status vnstat)"
+echo -e " OpenSSH Service          : $(check_status ssh)"
+echo -e " Dropbear Service         : $(check_status dropbear)"
+echo -e " Nginx Proxy (80 / 443)   : $(check_status nginx)"
+echo -e " Xray Core (Vmess/Vless)  : $(check_status xray)"
+echo -e " SSH WebSocket (10015)    : $(check_status ws-epro)"
+echo -e " BadVPN UDPGW (7300)      : $(check_status udpgw@7300)"
+echo -e " Vnstat Service           : $(check_status vnstat)"
 echo -e "${YELLOW}=========================================${NC}"
 EOF
 chmod +x /usr/bin/running
 
-# 7. สร้างคำสั่งหน้าหลัก 'menu'
+# 7. สร้างคำสั่งหน้าหลัก 'menu' พร้อมระบบจัดการ Xray และ SSL
 cat << 'EOF' > /usr/bin/menu
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -136,12 +131,15 @@ echo -e " IP Address : ${GREEN}${MYIP}${NC}"
 echo -e " Domain     : ${GREEN}${DOMAIN}${NC}"
 echo -e "${YELLOW}☉———————————————————————————————☉${NC}"
 echo -e " [1] สร้างบัญชี SSH / WebSocket"
-echo -e " [2] ดูรายละเอียด Xray (Vmess / Vless)"
-echo -e " [3] เช็กสถานะบริการทั้งหมด (running)"
-echo -e " [4] รีสตาร์ทบริการทั้งหมด"
+echo -e " [2] สร้างบัญชี Xray (Vmess & Vless)"
+echo -e " [3] ลบบัญชี Xray (Vmess & Vless)"
+echo -e " [4] ดูบัญชี Xray ทั้งหมด"
+echo -e " [5] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
+echo -e " [6] เช็กสถานะบริการทั้งหมด (running)"
+echo -e " [7] รีสตาร์ทบริการทั้งหมด"
 echo -e " [0] ออกจากเมนู"
 echo -e "${YELLOW}☉———————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-4]: " opt
+read -rp "เลือกเมนู [0-7]: " opt
 
 case $opt in
     1)
@@ -162,19 +160,111 @@ case $opt in
         echo -e "OpenSSH      : 22"
         echo -e "Dropbear     : 109, 143"
         echo -e "WS Port      : 80"
+        echo -e "WS SSL/TLS   : 443"
         echo -e "UDPGW Port   : 7100, 7200, 7300"
         echo -e "Payload      : GET / HTTP/1.1[crlf]Host: ${DOMAIN}[crlf]Upgrade: websocket[crlf][crlf]"
         echo -e "หมดอายุวันที่   : $(date -d "$days days" +"%Y-%m-%d")"
         echo -e "${YELLOW}=================================${NC}"
         ;;
     2)
+        read -rp "ตั้งชื่อบัญชี Xray (ห้ามซ้ำ): " user
+        if [[ -z "$user" ]]; then
+            echo -e "${RED}ชื่อบัญชีห้ามเว้นว่าง!${NC}"
+            exit 1
+        fi
+        EXISTS=$(jq -r '.inbounds[0].settings.clients[].email' /etc/xray/config.json | grep -w "$user")
+        if [[ -n "$EXISTS" ]]; then
+            echo -e "${RED}มีชื่อบัญชีนี้อยู่ในระบบแล้ว!${NC}"
+            exit 1
+        fi
+        UUID=$(cat /proc/sys/kernel/random/uuid)
+
+        # เพิ่มบัญชีลงใน config.json ด้วย jq
+        jq --arg u "$user" --arg id "$UUID" \
+           '.inbounds[0].settings.clients += [{"id": $id, "alterId": 0, "email": $u}] |
+            .inbounds[1].settings.clients += [{"id": $id, "email": $u}]' \
+           /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
+
+        systemctl restart xray
+
+        # สร้างลิงก์ Vmess (80 และ 443)
+        VMESS_TLS=$(cat <<JSON | base64 -w 0
+{"v":"2","ps":"${user}-TLS","add":"${DOMAIN}","port":"443","id":"${UUID}","aid":"0","net":"ws","path":"/vmess","type":"none","host":"${DOMAIN}","tls":"tls"}
+JSON
+)
+        VMESS_NTLS=$(cat <<JSON | base64 -w 0
+{"v":"2","ps":"${user}-HTTP","add":"${DOMAIN}","port":"80","id":"${UUID}","aid":"0","net":"ws","path":"/vmess","type":"none","host":"${DOMAIN}","tls":"none"}
+JSON
+)
+        VLESS_TLS="vless://${UUID}@${DOMAIN}:443?path=%2Fvless&security=tls&encryption=none&type=ws&host=${DOMAIN}&sni=${DOMAIN}#${user}-TLS"
+        VLESS_NTLS="vless://${UUID}@${DOMAIN}:80?path=%2Fvless&security=none&encryption=none&type=ws&host=${DOMAIN}#${user}-HTTP"
+
         clear
-        cat /etc/xray/client-info.txt 2>/dev/null || echo "ยังไม่มีข้อมูล Xray"
+        echo -e "${YELLOW}====== ข้อมูลบัญชี Xray (Vmess / Vless) ======${NC}"
+        echo -e "ชื่อบัญชี        : ${GREEN}${user}${NC}"
+        echo -e "Host / Domain : ${GREEN}${DOMAIN}${NC}"
+        echo -e "Port TLS/HTTP : 443 / 80"
+        echo -e "UUID          : ${GREEN}${UUID}${NC}"
+        echo -e "Path Vmess    : /vmess"
+        echo -e "Path Vless    : /vless"
+        echo -e "${YELLOW}-------------------------------------------${NC}"
+        echo -e "${CYAN}[ลิงก์ Vmess SSL/TLS (Port 443)]${NC}"
+        echo -e "vmess://${VMESS_TLS}"
+        echo -e ""
+        echo -e "${CYAN}[ลิงก์ Vmess HTTP (Port 80)]${NC}"
+        echo -e "vmess://${VMESS_NTLS}"
+        echo -e ""
+        echo -e "${CYAN}[ลิงก์ Vless SSL/TLS (Port 443)]${NC}"
+        echo -e "${VLESS_TLS}"
+        echo -e ""
+        echo -e "${CYAN}[ลิงก์ Vless HTTP (Port 80)]${NC}"
+        echo -e "${VLESS_NTLS}"
+        echo -e "${YELLOW}===========================================${NC}"
         ;;
     3)
-        running
+        echo -e "${CYAN}รายชื่อบัญชี Xray ปัจจุบัน:${NC}"
+        jq -r '.inbounds[0].settings.clients[] | "- \(.email) (UUID: \(.id))"' /etc/xray/config.json
+        echo -e "${YELLOW}-------------------------------------------${NC}"
+        read -rp "พิมพ์ชื่อบัญชีที่ต้องการลบ: " deluser
+        if [[ "$deluser" == "default" ]]; then
+            echo -e "${RED}ไม่สามารถลบบัญชีเริ่มต้น (default) ได้!${NC}"
+            exit 1
+        fi
+        jq --arg u "$deluser" \
+           '(.inbounds[0].settings.clients) |= map(select(.email != $u)) |
+            (.inbounds[1].settings.clients) |= map(select(.email != $u))' \
+           /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
+        systemctl restart xray
+        echo -e "${GREEN}ลบบัญชี ${deluser} เรียบร้อยแล้ว!${NC}"
         ;;
     4)
+        clear
+        echo -e "${YELLOW}=== รายชื่อบัญชี Xray ทั้งหมดในระบบ ===${NC}"
+        jq -r '.inbounds[0].settings.clients[] | "ชื่อบัญชี: \(.email) | UUID: \(.id)"' /etc/xray/config.json
+        echo -e "${YELLOW}====================================${NC}"
+        ;;
+    5)
+        read -rp "กรอกโดเมนใหม่ของคุณ (ชี้ IP มายังเซิร์ฟเวอร์นี้แล้ว): " newdom
+        if [[ -z "$newdom" ]]; then
+            echo -e "${RED}ยกเลิกการทำรายการ${NC}"
+            exit 1
+        fi
+        echo "$newdom" > /etc/xray/domain
+        echo "$newdom" > /root/domain
+        systemctl stop nginx
+        curl https://get.acme.sh | sh -s email=admin@${newdom}
+        /root/.acme.sh/acme.sh --issue -d "${newdom}" --standalone -k ec-256 --force
+        /root/.acme.sh/acme.sh --installcert -d "${newdom}" \
+            --fullchainpath /etc/xray/xray.crt \
+            --keypath /etc/xray/xray.key --ecc
+        systemctl start nginx
+        systemctl restart xray
+        echo -e "${GREEN}อัปเดตโดเมนและติดตั้ง SSL พอร์ต 443 เรียบร้อยแล้ว!${NC}"
+        ;;
+    6)
+        running
+        ;;
+    7)
         systemctl restart ssh dropbear nginx xray ws-epro udpgw@7100 udpgw@7200 udpgw@7300 vnstat
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
@@ -188,4 +278,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "SSH, VPN & UDPGW Service Installed Successfully!"
+echo "SSH, VPN & Full Menu Installed Successfully!"
