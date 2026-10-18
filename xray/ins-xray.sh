@@ -98,10 +98,24 @@ cat <<EOF > /etc/xray/config.json
   ],
   "outbounds": [
     {
-      "protocol": "freedom"
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "blocked"
     }
-  ]
-}
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "protocol": ["bittorrent"],
+        "outboundTag": "blocked"
+      }
+    ]
+  }
 EOF
 
 # 4. บันทึกข้อมูลบัญชีเริ่มต้น
