@@ -1,4 +1,7 @@
 #!/bin/bash
+# =========================================
+#  SSH, DROPBEAR, NGINX & BADVPN INSTALLER
+# =========================================
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. ลบ Apache2 และ UFW ป้องกันการแย่งพอร์ต 80
@@ -10,19 +13,34 @@ apt-get autoremove -y >/dev/null 2>&1
 # 2. ตั้งค่า Timezone เป็นเวลาไทย
 ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
 
-# 3. ติดตั้งแพ็กเกจหลักและเครื่องมือสร้าง BadVPN
+# 3. ติดตั้งแพ็กเกจหลัก
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl jq python3 cmake build-essential git
+apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools
 
-# 4. คอมไพล์และติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
-git clone https://github.com/ambrop72/badvpn.git /tmp/badvpn
-mkdir -p /tmp/badvpn/build
-cd /tmp/badvpn/build
-cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1
-make install
-cd /root
-rm -rf /tmp/badvpn
+# 4. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
+echo "กำลังติดตั้ง BadVPN UDPGW..."
+wget -q -O /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
 
+# หากลิงก์แรกโหลดไม่ผ่านหรือไฟล์มีขนาด 0 byte ให้ลองลิงก์สำรอง
+if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
+    wget -q -O /usr/local/bin/badvpn-udpgw "https://github.com/ambrop72/badvpn/raw/master/badvpn-udpgw64"
+fi
+
+# หากยังโหลดไฟล์ Binary ไม่ได้อีก ให้ทำการ Compile เองพร้อมไลบรารีที่จำเป็นครบชุด
+if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
+    apt-get install -y cmake build-essential git libnspr4-dev libnss3-dev pkg-config
+    git clone https://github.com/ambrop72/badvpn.git /tmp/badvpn
+    mkdir -p /tmp/badvpn/build
+    cd /tmp/badvpn/build || exit
+    cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1
+    make install
+    cd /root || exit
+    rm -rf /tmp/badvpn
+fi
+
+chmod +x /usr/local/bin/badvpn-udpgw
+
+# สร้าง Systemd Service สำหรับรัน UDPGW หลายพอร์ต
 cat <<EOF > /etc/systemd/system/udpgw@.service
 [Unit]
 Description=BadVPN UDPGW Service on Port %i
@@ -41,7 +59,7 @@ EOF
 
 systemctl daemon-reload
 for port in 7100 7200 7300; do
-    systemctl enable udpgw@${port}
+    systemctl enable udpgw@${port} >/dev/null 2>&1
     systemctl restart udpgw@${port}
 done
 
@@ -54,14 +72,16 @@ DROPBEAR_BANNER="/etc/issue.net"
 DROPBEAR_RECEIVE_WINDOW=65536
 EOF
 
+# เพิ่ม Shell ที่อนุญาตสำหรับบัญชี VPN (ไม่ให้เข้าหน้า Terminal ได้)
 grep -qxF '/bin/false' /etc/shells || echo "/bin/false" >> /etc/shells
 grep -qxF '/usr/sbin/nologin' /etc/shells || echo "/usr/sbin/nologin" >> /etc/shells
 
+# สร้าง Banner ต้อนรับเวลาเชื่อมต่อ SSH
 cat <<EOF > /etc/issue.net
 <p style="text-align:center"><b>=== PRIVATE VPN SERVER ===</b></p>
 EOF
 
-systemctl enable dropbear
+systemctl enable dropbear >/dev/null 2>&1
 systemctl restart dropbear
 
 # 6. สร้างคำสั่งเช็กสถานะ 'running'
@@ -100,6 +120,7 @@ chmod +x /usr/bin/running
 cat << 'EOF' > /usr/bin/menu
 #!/bin/bash
 GREEN='\033[0;32m'
+RED='\033[0;31m'
 CYAN='\033[0;36m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
@@ -125,12 +146,16 @@ read -rp "เลือกเมนู [0-4]: " opt
 case $opt in
     1)
         read -rp "ชื่อผู้ใช้ (Username): " user
+        if id "$user" &>/dev/null; then
+            echo -e "${RED}ชื่อผู้ใช้นี้มีอยู่ในระบบแล้ว!${NC}"
+            exit 1
+        fi
         read -rp "รหัสผ่าน (Password): " pass
         read -rp "จำนวนวันที่ใช้งาน (เช่น 30): " days
         useradd -e $(date -d "$days days" +"%Y-%m-%d") -s /bin/false -M "$user"
         echo "$user:$pass" | chpasswd
         clear
-        echo -e "=== ข้อมูลบัญชี SSH & WebSocket ==="
+        echo -e "${YELLOW}=== ข้อมูลบัญชี SSH & WebSocket ===${NC}"
         echo -e "Host/IP      : $DOMAIN ($MYIP)"
         echo -e "Username     : $user"
         echo -e "Password     : $pass"
@@ -140,6 +165,7 @@ case $opt in
         echo -e "UDPGW Port   : 7100, 7200, 7300"
         echo -e "Payload      : GET / HTTP/1.1[crlf]Host: ${DOMAIN}[crlf]Upgrade: websocket[crlf][crlf]"
         echo -e "หมดอายุวันที่   : $(date -d "$days days" +"%Y-%m-%d")"
+        echo -e "${YELLOW}=================================${NC}"
         ;;
     2)
         clear
@@ -149,14 +175,14 @@ case $opt in
         running
         ;;
     4)
-        systemctl restart ssh dropbear nginx xray ws-epro udpgw@7100 udpgw@7200 udpgw@7300
+        systemctl restart ssh dropbear nginx xray ws-epro udpgw@7100 udpgw@7200 udpgw@7300 vnstat
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
     0)
         exit 0
         ;;
     *)
-        echo "เลือกเมนูไม่ถูกต้อง"
+        echo -e "${RED}เลือกเมนูไม่ถูกต้อง${NC}"
         ;;
 esac
 EOF
