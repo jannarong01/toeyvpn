@@ -1,7 +1,7 @@
 #!/bin/bash
-# ==========================================================
-#  SSH, DROPBEAR, BADVPN, SECURITY & ADVANCED USER MANAGER
-# ==========================================================
+# ===============================================================
+#  SSH, DROPBEAR, BADVPN, SECURITY, USER MANAGER & MAINTENANCE
+# ===============================================================
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. ลบ Apache2 และ UFW ป้องกันการแย่งพอร์ต 80
@@ -17,7 +17,7 @@ ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc
+apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix
 
 # 4. ตั้งค่าระบบป้องกันการสุ่มรหัสผ่าน (Fail2Ban)
 cat <<EOF > /etc/fail2ban/jail.local
@@ -40,18 +40,19 @@ EOF
 systemctl enable fail2ban >/dev/null 2>&1
 systemctl restart fail2ban
 
-# 5. ตั้งค่า Iptables บล็อก BitTorrent / P2P (Anti-Torrent)
-iptables -F FORWARD
+# 5. ตั้งค่า Iptables บล็อก BitTorrent / P2P (เช็กก่อนเพิ่มเพื่อป้องกันกฎซ้ำซ้อนตอนอัปเดต)
 for keyword in "get_peers" "announce_peer" "find_node" "BitTorrent" "BitTorrent protocol" "peer_id=" ".torrent" "announce.php?passkey=" "torrent" "announce" "info_hash"; do
-    iptables -A FORWARD -m string --string "$keyword" --algo bm -j DROP
-    iptables -A OUTPUT -m string --string "$keyword" --algo bm -j DROP
+    iptables -C FORWARD -m string --string "$keyword" --algo bm -j DROP 2>/dev/null || iptables -A FORWARD -m string --string "$keyword" --algo bm -j DROP
+    iptables -C OUTPUT -m string --string "$keyword" --algo bm -j DROP 2>/dev/null || iptables -A OUTPUT -m string --string "$keyword" --algo bm -j DROP
 done
 netfilter-persistent save >/dev/null 2>&1
 netfilter-persistent reload >/dev/null 2>&1
 
 # 6. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
-echo "กำลังติดตั้ง BadVPN UDPGW..."
-wget -q -O /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
+if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
+    echo "กำลังติดตั้ง BadVPN UDPGW..."
+    wget -q -O /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
+fi
 
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
     wget -q -O /usr/local/bin/badvpn-udpgw "https://github.com/ambrop72/badvpn/raw/master/badvpn-udpgw64"
@@ -148,9 +149,10 @@ fi
 EOF
 chmod +x /usr/bin/xp
 
-# 9. สร้างสคริปต์เตะคนล็อกอินซ้อนเกินกำหนด (tendang / Auto-Kill Multi-Login)
+# 9. สร้างสคริปต์เตะคนล็อกอินซ้อนเกินกำหนด (tendang) และสคริปต์ล้างขยะ (clear-log)
 mkdir -p /etc/xray
-echo "2" > /etc/xray/limit-ssh
+[ ! -f /etc/xray/limit-ssh ] && echo "2" > /etc/xray/limit-ssh
+[ ! -f /etc/xray/autoreboot-status ] && echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)" > /etc/xray/autoreboot-status
 
 cat << 'EOF' > /usr/bin/tendang
 #!/bin/bash
@@ -175,12 +177,28 @@ done
 EOF
 chmod +x /usr/bin/tendang
 
+cat << 'EOF' > /usr/bin/clear-log
+#!/bin/bash
+for logfile in /var/log/xray/access.log /var/log/xray/error.log /var/log/nginx/access.log /var/log/nginx/error.log /var/log/syslog /var/log/btmp /var/log/messages /var/log/debug; do
+    if [ -f "$logfile" ]; then
+        cat /dev/null > "$logfile"
+    fi
+done
+journalctl --vacuum-size=50M >/dev/null 2>&1
+sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+EOF
+chmod +x /usr/bin/clear-log
+
+if [ ! -f /etc/cron.d/vpn-cron ]; then
 cat <<EOF > /etc/cron.d/vpn-cron
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 0 0 * * * root /usr/bin/xp
 * * * * * root /usr/bin/tendang
+0 */6 * * * root /usr/bin/clear-log
+0 3 * * * root /sbin/reboot
 EOF
+fi
 systemctl restart cron
 
 # 10. สร้างคำสั่งเช็กสถานะ 'running'
@@ -207,6 +225,8 @@ else
     TORRENT_STAT="${RED}[INACTIVE]${NC}"
 fi
 
+REBOOT_STAT=$(cat /etc/xray/autoreboot-status 2>/dev/null || echo "เปิดใช้งาน (03:00 น.)")
+
 clear
 echo -e "${YELLOW}=========================================${NC}"
 echo -e "           ${CYAN}STATUS RUNNING SERVICE${NC}"
@@ -220,6 +240,7 @@ echo -e " BadVPN UDPGW (7300)      : $(check_status udpgw@7300)"
 echo -e " Fail2Ban (Anti-Brute)    : $(check_status fail2ban)"
 echo -e " Anti-Torrent Firewall    : ${TORRENT_STAT}"
 echo -e " Cron (Auto-Kill / Exp)   : $(check_status cron)"
+echo -e " Auto-Reboot Schedule     : ${GREEN}${REBOOT_STAT}${NC}"
 echo -e "${YELLOW}=========================================${NC}"
 EOF
 chmod +x /usr/bin/running
@@ -236,6 +257,8 @@ NC='\033[0m'
 MYIP=$(curl -sS ipv4.icanhazip.com)
 DOMAIN=$(cat /etc/xray/domain 2>/dev/null || echo "$MYIP")
 MAX_LOGIN=$(cat /etc/xray/limit-ssh 2>/dev/null || echo "2")
+REBOOT_STAT=$(cat /etc/xray/autoreboot-status 2>/dev/null || echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)")
+RAM_USAGE=$(free -m | awk 'NR==2{printf "%s/%s MB (%.1f%%)", $3,$2,$3*100/$2 }')
 mkdir -p /etc/xray
 touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt
 
@@ -245,7 +268,9 @@ echo -e "               ${CYAN}PRIVATE VPN MENU${NC}"
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
 echo -e " IP Address  : ${GREEN}${MYIP}${NC}"
 echo -e " Domain      : ${GREEN}${DOMAIN}${NC}"
+echo -e " RAM Usage   : ${GREEN}${RAM_USAGE}${NC}"
 echo -e " Multi-Login : ${GREEN}สูงสุด ${MAX_LOGIN} เครื่อง/บัญชี${NC}"
+echo -e " Auto-Reboot : ${GREEN}${REBOOT_STAT}${NC}"
 echo -e "${YELLOW}☉——————————— [ จัดการบัญชี SSH / WS ] ———————————☉${NC}"
 echo -e " [1]  สร้างบัญชี SSH / WebSocket"
 echo -e " [2]  ต่ออายุบัญชี SSH (Renew)"
@@ -264,10 +289,14 @@ echo -e " [12] ตั้งค่าจำกัดจำนวนเครื�
 echo -e " [13] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
 echo -e " [14] เช็กสถานะบริการและไฟร์วอลล์ (running)"
 echo -e " [15] รีสตาร์ทบริการทั้งหมด"
-echo -e " [16] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะ)"
+echo -e " [16] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะบัญชี)"
+echo -e "${YELLOW}☉——————————— [ บำรุงรักษาเซิร์ฟเวอร์ ] —————————————☉${NC}"
+echo -e " [17] ล้างไฟล์ขยะ Log และเคลียร์ RAM ทันที"
+echo -e " [18] ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ"
+echo -e " [19] อัปเดตสคริปต์และเมนูเวอร์ชันล่าสุดจาก GitHub"
 echo -e " [0]  ออกจากเมนู"
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-16]: " opt
+read -rp "เลือกเมนู [0-19]: " opt
 
 case $opt in
     1)
@@ -612,6 +641,61 @@ JSON
         /usr/bin/xp
         echo -e "${GREEN}เคลียร์บัญชีหมดอายุเสร็จสิ้น!${NC}"
         ;;
+    17)
+        echo -e "${CYAN}กำลังล้างไฟล์ Log และเคลียร์ RAM Cache...${NC}"
+        BEFORE_RAM=$(free -m | awk 'NR==2{print $3}')
+        /usr/bin/clear-log
+        AFTER_RAM=$(free -m | awk 'NR==2{print $3}')
+        echo -e "${GREEN}ล้างไฟล์ขยะและเคลียร์ RAM สำเร็จ! (RAM ที่ใช้งานลดลงจาก ${BEFORE_RAM} MB เหลือ ${AFTER_RAM} MB)${NC}"
+        ;;
+    18)
+        echo -e "${YELLOW}=== ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ ===${NC}"
+        echo -e " [1] รีบูตทุกวัน เวลา 03:00 น. (แนะนำ)"
+        echo -e " [2] รีบูตทุกวัน เวลา 05:00 น."
+        echo -e " [3] รีบูตทุกๆ 12 ชั่วโมง (00:00 น. และ 12:00 น.)"
+        echo -e " [4] ปิดระบบ Auto-Reboot"
+        read -rp "เลือกตั้งเวลา [1-4]: " rb_opt
+        sed -i '/\/sbin\/reboot/d' /etc/cron.d/vpn-cron
+        case $rb_opt in
+            1)
+                echo "0 3 * * * root /sbin/reboot" >> /etc/cron.d/vpn-cron
+                echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)" > /etc/xray/autoreboot-status
+                echo -e "${GREEN}ตั้งค่า Auto-Reboot ทุกวัน เวลา 03:00 น. เรียบร้อยแล้ว!${NC}"
+                ;;
+            2)
+                echo "0 5 * * * root /sbin/reboot" >> /etc/cron.d/vpn-cron
+                echo "เปิดใช้งาน (ทุกวัน เวลา 05:00 น.)" > /etc/xray/autoreboot-status
+                echo -e "${GREEN}ตั้งค่า Auto-Reboot ทุกวัน เวลา 05:00 น. เรียบร้อยแล้ว!${NC}"
+                ;;
+            3)
+                echo "0 */12 * * * root /sbin/reboot" >> /etc/cron.d/vpn-cron
+                echo "เปิดใช้งาน (ทุกๆ 12 ชั่วโมง)" > /etc/xray/autoreboot-status
+                echo -e "${GREEN}ตั้งค่า Auto-Reboot ทุกๆ 12 ชั่วโมง เรียบร้อยแล้ว!${NC}"
+                ;;
+            4)
+                echo "ปิดใช้งาน (OFF)" > /etc/xray/autoreboot-status
+                echo -e "${YELLOW}ปิดระบบ Auto-Reboot เรียบร้อยแล้ว!${NC}"
+                ;;
+            *)
+                echo -e "${RED}ตัวเลือกไม่ถูกต้อง${NC}"
+                ;;
+        esac
+        systemctl restart cron
+        ;;
+    19)
+        echo -e "${CYAN}กำลังดึงไฟล์อัปเดตล่าสุดจาก GitHub (jannarong01/toeyvpn)...${NC}"
+        wget -q -O /root/update-vpn.sh "https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh"
+        if [ -s /root/update-vpn.sh ]; then
+            sed -i 's/\r$//' /root/update-vpn.sh
+            chmod +x /root/update-vpn.sh
+            /root/update-vpn.sh
+            rm -f /root/update-vpn.sh
+            echo -e "${GREEN}อัปเดตสคริปต์และเมนูเป็นเวอร์ชันล่าสุดเรียบร้อยแล้ว!${NC}"
+        else
+            rm -f /root/update-vpn.sh
+            echo -e "${RED}ไม่สามารถดาวน์โหลดไฟล์จาก GitHub ได้ กรุณาตรวจสอบลิงก์หรือการเชื่อมต่ออินเทอร์เน็ต${NC}"
+        fi
+        ;;
     0)
         exit 0
         ;;
@@ -622,4 +706,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "SSH, VPN, Security & Advanced User Manager Installed Successfully!"
+echo "SSH, VPN, Security, User Manager & Maintenance Suite Installed Successfully!"
