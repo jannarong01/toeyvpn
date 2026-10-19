@@ -17,7 +17,7 @@ ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent
+apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc
 
 # 4. ตั้งค่าระบบป้องกันการสุ่มรหัสผ่าน (Fail2Ban)
 cat <<EOF > /etc/fail2ban/jail.local
@@ -123,6 +123,7 @@ for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
     if [[ "$exp_date" != "never" && -n "$exp_date" ]]; then
         exp_sec=$(date -d "$exp_date" +%s)
         if [[ $today_sec -ge $exp_sec ]]; then
+            killall -u "$user" 2>/dev/null
             userdel -f "$user"
             echo "Deleted Expired SSH Account: $user"
         fi
@@ -157,21 +158,22 @@ if [[ "$MAX" -le 0 ]]; then
     exit 0
 fi
 
-# ดึงรายชื่อผู้ใช้ระบบทั้งหมด (UID >= 1000)
 for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
-    # นับจำนวน Session ใน OpenSSH
-    ssh_pids=$(ps -u "$user" -o pid=,comm= 2>/dev/null | awk '$2 == "sshd" {print $1}')
-    count=$(echo "$ssh_pids" | wc -w)
+    pids=$(pgrep -u "$user" sshd)
+    if [[ -n "$pids" ]]; then
+        count=$(echo "$pids" | wc -l)
+    else
+        count=0
+    fi
 
     if [[ $count -gt $MAX ]]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Kick Multi-Login User: $user ($count/$MAX sessions)" >> /var/log/autokill.log
-        kill -9 $ssh_pids 2>/dev/null
+        kill -9 $pids 2>/dev/null
     fi
 done
 EOF
 chmod +x /usr/bin/tendang
 
-# ตั้งเวลา Cron Job (เช็กวันหมดอายุตอนเที่ยงคืน และเช็กล็อกอินซ้อนทุก 1 นาที)
 cat <<EOF > /etc/cron.d/vpn-cron
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
@@ -243,19 +245,21 @@ echo -e " IP Address  : ${GREEN}${MYIP}${NC}"
 echo -e " Domain      : ${GREEN}${DOMAIN}${NC}"
 echo -e " Multi-Login : ${GREEN}สูงสุด ${MAX_LOGIN} เครื่อง/บัญชี${NC}"
 echo -e "${YELLOW}☉———————————————————————————————————————☉${NC}"
-echo -e " [1] สร้างบัญชี SSH / WebSocket"
-echo -e " [2] สร้างบัญชี Xray (Vmess & Vless)"
-echo -e " [3] ลบบัญชี Xray (Vmess & Vless)"
-echo -e " [4] ดูบัญชี Xray ทั้งหมด (พร้อมวันหมดอายุ)"
-echo -e " [5] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
-echo -e " [6] เช็กสถานะบริการและไฟร์วอลล์ (running)"
-echo -e " [7] รีสตาร์ทบริการทั้งหมด"
-echo -e " [8] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะ)"
-echo -e " [9] ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
-echo -e " [10] เช็กผู้ใช้ออนไลน์และประวัติการเตะ"
-echo -e " [0] ออกจากเมนู"
+echo -e " [1]  สร้างบัญชี SSH / WebSocket"
+echo -e " [2]  ดูรายชื่อบัญชี SSH ทั้งหมด (พร้อมวันหมดอายุ)"
+echo -e " [3]  ลบบัญชี SSH / WebSocket"
+echo -e " [4]  สร้างบัญชี Xray (Vmess & Vless)"
+echo -e " [5]  ดูรายชื่อบัญชี Xray ทั้งหมด"
+echo -e " [6]  ลบบัญชี Xray (Vmess & Vless)"
+echo -e " [7]  เช็กผู้ใช้ออนไลน์ขณะนี้ (SSH / WS / Dropbear)"
+echo -e " [8]  ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
+echo -e " [9]  เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
+echo -e " [10] เช็กสถานะบริการและไฟร์วอลล์ (running)"
+echo -e " [11] รีสตาร์ทบริการทั้งหมด"
+echo -e " [12] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะ)"
+echo -e " [0]  ออกจากเมนู"
 echo -e "${YELLOW}☉———————————————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-10]: " opt
+read -rp "เลือกเมนู [0-12]: " opt
 
 case $opt in
     1)
@@ -284,6 +288,33 @@ case $opt in
         echo -e "${YELLOW}=================================${NC}"
         ;;
     2)
+        clear
+        echo -e "${YELLOW}========= รายชื่อบัญชี SSH ทั้งหมด =========${NC}"
+        printf "%-18s %-20s %s\n" "Username" "Expire Date" "Status"
+        echo -e "---------------------------------------------------"
+        for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
+            exp=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
+            passwd_stat=$(passwd -S "$user" 2>/dev/null | awk '{print $2}')
+            if [[ "$passwd_stat" == "L" ]]; then
+                stat="Locked"
+            else
+                stat="Active"
+            fi
+            printf "%-18s %-20s %s\n" "$user" "$exp" "$stat"
+        done
+        echo -e "${YELLOW}=========================================${NC}"
+        ;;
+    3)
+        read -rp "พิมพ์ชื่อบัญชี SSH ที่ต้องการลบ: " delssh
+        if id "$delssh" &>/dev/null; then
+            killall -u "$delssh" 2>/dev/null
+            userdel -f "$delssh" 2>/dev/null
+            echo -e "${GREEN}ลบบัญชี SSH: ${delssh} เรียบร้อยแล้ว!${NC}"
+        else
+            echo -e "${RED}ไม่พบชื่อบัญชี ${delssh} ในระบบ!${NC}"
+        fi
+        ;;
+    4)
         read -rp "ตั้งชื่อบัญชี Xray (ห้ามซ้ำ): " user
         if [[ -z "$user" ]]; then
             echo -e "${RED}ชื่อบัญชีห้ามเว้นว่าง!${NC}"
@@ -334,7 +365,22 @@ JSON
         echo -e "${VLESS_NTLS}\n"
         echo -e "${YELLOW}===========================================${NC}"
         ;;
-    3)
+    5)
+        clear
+        echo -e "${YELLOW}========= รายชื่อบัญชี Xray ทั้งหมด =========${NC}"
+        printf "%-15s %-15s %s\n" "Username" "Expire Date" "UUID"
+        echo -e "---------------------------------------------------"
+        if [ -s /etc/xray/xray-exp.txt ]; then
+            while IFS=':' read -r u exp; do
+                uuid=$(jq -r --arg usr "$u" '.inbounds[0].settings.clients[] | select(.email == $usr) | .id' /etc/xray/config.json)
+                printf "%-15s %-15s %s\n" "$u" "$exp" "$uuid"
+            done < /etc/xray/xray-exp.txt
+        else
+            echo "ยังไม่มีการสร้างบัญชี Xray ในระบบ"
+        fi
+        echo -e "${YELLOW}===========================================${NC}"
+        ;;
+    6)
         echo -e "${CYAN}รายชื่อบัญชี Xray ปัจจุบัน:${NC}"
         jq -r '.inbounds[0].settings.clients[] | "- \(.email) (UUID: \(.id))"' /etc/xray/config.json
         echo -e "${YELLOW}-------------------------------------------${NC}"
@@ -351,22 +397,54 @@ JSON
         systemctl restart xray
         echo -e "${GREEN}ลบบัญชี ${deluser} เรียบร้อยแล้ว!${NC}"
         ;;
-    4)
+    7)
         clear
-        echo -e "${YELLOW}========= รายชื่อบัญชี Xray ทั้งหมด =========${NC}"
-        printf "%-15s %-15s %s\n" "Username" "Expire Date" "UUID"
+        echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (OpenSSH & SSH-WS) ===${NC}"
+        printf "%-18s %-15s %s\n" "Username" "จำนวนที่เชื่อมต่อ" "PID"
         echo -e "---------------------------------------------------"
-        if [ -s /etc/xray/xray-exp.txt ]; then
-            while IFS=':' read -r u exp; do
-                uuid=$(jq -r --arg usr "$u" '.inbounds[0].settings.clients[] | select(.email == $usr) | .id' /etc/xray/config.json)
-                printf "%-15s %-15s %s\n" "$u" "$exp" "$uuid"
-            done < /etc/xray/xray-exp.txt
-        else
-            echo "ยังไม่มีการสร้างบัญชี Xray ในระบบ"
+        has_online=0
+        for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
+            pids=$(pgrep -u "$user" sshd 2>/dev/null | tr '\n' ' ')
+            if [[ -z "$pids" ]]; then
+                pids=$(ps -ef | grep -E "sshd: ${user}" | grep -v grep | awk '{print $2}' | tr '\n' ' ')
+            fi
+            if [[ -n "$pids" ]]; then
+                count=$(echo "$pids" | wc -w)
+                printf "%-18s %-15s %s\n" "$user" "${count} เครื่อง" "$pids"
+                has_online=1
+            fi
+        done
+        if [[ $has_online -eq 0 ]]; then
+            echo "ไม่มีผู้ใช้ออนไลน์ผ่าน OpenSSH / SSH-WS ในขณะนี้"
         fi
-        echo -e "${YELLOW}===========================================${NC}"
+
+        echo -e ""
+        echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (Dropbear Port 109/143) ===${NC}"
+        db_pids=$(ps aux | grep -i dropbear | awk '{print $2}')
+        has_db=0
+        for pid in $db_pids; do
+            db_log=$(grep -i "dropbear\[$pid\]" /var/log/auth.log 2>/dev/null | grep -i "Password auth succeeded" | tail -n 1)
+            if [[ -n "$db_log" ]]; then
+                db_user=$(echo "$db_log" | awk '{print $10}' | tr -d "'")
+                printf "%-18s %-15s %s\n" "$db_user" "1 เครื่อง" "$pid"
+                has_db=1
+            fi
+        done
+        if [[ $has_db -eq 0 ]]; then
+            echo "ไม่มีผู้ใช้ออนไลน์ผ่าน Dropbear ในขณะนี้"
+        fi
+
+        echo -e ""
+        echo -e "${YELLOW}=== ประวัติการเตะล็อกอินซ้อน 10 รายการล่าสุด ===${NC}"
+        tail -n 10 /var/log/autokill.log 2>/dev/null || echo "ยังไม่มีประวัติการทำผิดกฎ"
+        echo -e "${YELLOW}===================================================${NC}"
         ;;
-    5)
+    8)
+        read -rp "กำหนดจำนวนเครื่องสูงสุดต่อ 1 บัญชี (เช่น 2, ใส่ 0 เพื่อปิด): " max_num
+        echo "$max_num" > /etc/xray/limit-ssh
+        echo -e "${GREEN}บันทึกการจำกัดล็อกอินไว้ที่ ${max_num} เครื่อง เรียบร้อยแล้ว!${NC}"
+        ;;
+    9)
         read -rp "กรอกโดเมนใหม่ของคุณ (ชี้ IP มายังเซิร์ฟเวอร์นี้แล้ว): " newdom
         if [[ -z "$newdom" ]]; then
             echo -e "${RED}ยกเลิกการทำรายการ${NC}"
@@ -384,30 +462,17 @@ JSON
         systemctl restart xray
         echo -e "${GREEN}อัปเดตโดเมนและติดตั้ง SSL พอร์ต 443 เรียบร้อยแล้ว!${NC}"
         ;;
-    6)
+    10)
         running
         ;;
-    7)
+    11)
         systemctl restart ssh dropbear nginx xray ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
-    8)
+    12)
         echo -e "${CYAN}กำลังสแกนหาและลบบัญชีที่หมดอายุ...${NC}"
         /usr/bin/xp
         echo -e "${GREEN}เคลียร์บัญชีหมดอายุเสร็จสิ้น!${NC}"
-        ;;
-    9)
-        read -rp "กำหนดจำนวนเครื่องสูงสุดต่อ 1 บัญชี (เช่น 2, ใส่ 0 เพื่อปิด): " max_num
-        echo "$max_num" > /etc/xray/limit-ssh
-        echo -e "${GREEN}บันทึกการจำกัดล็อกอินไว้ที่ ${max_num} เครื่อง เรียบร้อยแล้ว!${NC}"
-        ;;
-    10)
-        clear
-        echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ขณะนี้ (SSH) ===${NC}"
-        ps aux | grep "\[priv\]" | awk '{print "User: " $1 " (PID: " $2 ")"}'
-        echo -e "${YELLOW}=== ประวัติการเตะล็อกอินซ้อน 10 รายการล่าสุด ===${NC}"
-        tail -n 10 /var/log/autokill.log 2>/dev/null || echo "ยังไม่มีประวัติการทำผิดกฎ"
-        echo -e "${YELLOW}=======================================${NC}"
         ;;
     0)
         exit 0
