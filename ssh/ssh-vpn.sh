@@ -1,7 +1,7 @@
 #!/bin/bash
-# =================================================
-#  SSH, DROPBEAR, BADVPN, MENU & SECURITY SUITE
-# =================================================
+# ==========================================================
+#  SSH, DROPBEAR, BADVPN, SECURITY & ADVANCED USER MANAGER
+# ==========================================================
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. ลบ Apache2 และ UFW ป้องกันการแย่งพอร์ต 80
@@ -139,6 +139,7 @@ if [ -f /etc/xray/xray-exp.txt ]; then
                 (.inbounds[1].settings.clients) |= map(select(.email != $u))' \
                /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
             sed -i "/^$x_user:/d" /etc/xray/xray-exp.txt
+            sed -i "/^$x_user:/d" /etc/xray/xray-lock.txt 2>/dev/null
             systemctl restart xray
             echo "Deleted Expired Xray Account: $x_user"
         fi
@@ -235,31 +236,38 @@ NC='\033[0m'
 MYIP=$(curl -sS ipv4.icanhazip.com)
 DOMAIN=$(cat /etc/xray/domain 2>/dev/null || echo "$MYIP")
 MAX_LOGIN=$(cat /etc/xray/limit-ssh 2>/dev/null || echo "2")
-touch /etc/xray/xray-exp.txt
+mkdir -p /etc/xray
+touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt
 
 clear
-echo -e "${YELLOW}☉———————————————————————————————————————☉${NC}"
-echo -e "            ${CYAN}PRIVATE VPN MENU${NC}"
-echo -e "${YELLOW}☉———————————————————————————————————————☉${NC}"
+echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
+echo -e "               ${CYAN}PRIVATE VPN MENU${NC}"
+echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
 echo -e " IP Address  : ${GREEN}${MYIP}${NC}"
 echo -e " Domain      : ${GREEN}${DOMAIN}${NC}"
 echo -e " Multi-Login : ${GREEN}สูงสุด ${MAX_LOGIN} เครื่อง/บัญชี${NC}"
-echo -e "${YELLOW}☉———————————————————————————————————————☉${NC}"
+echo -e "${YELLOW}☉——————————— [ จัดการบัญชี SSH / WS ] ———————————☉${NC}"
 echo -e " [1]  สร้างบัญชี SSH / WebSocket"
-echo -e " [2]  ดูรายชื่อบัญชี SSH ทั้งหมด (พร้อมวันหมดอายุ)"
-echo -e " [3]  ลบบัญชี SSH / WebSocket"
-echo -e " [4]  สร้างบัญชี Xray (Vmess & Vless)"
-echo -e " [5]  ดูรายชื่อบัญชี Xray ทั้งหมด"
-echo -e " [6]  ลบบัญชี Xray (Vmess & Vless)"
-echo -e " [7]  เช็กผู้ใช้ออนไลน์ขณะนี้ (SSH / WS / Dropbear)"
-echo -e " [8]  ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
-echo -e " [9]  เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
-echo -e " [10] เช็กสถานะบริการและไฟร์วอลล์ (running)"
-echo -e " [11] รีสตาร์ทบริการทั้งหมด"
-echo -e " [12] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะ)"
+echo -e " [2]  ต่ออายุบัญชี SSH (Renew)"
+echo -e " [3]  ระงับ / ปลดล็อกบัญชี SSH (Lock/Unlock)"
+echo -e " [4]  ลบบัญชี SSH / WebSocket"
+echo -e " [5]  ดูรายชื่อบัญชี SSH ทั้งหมด"
+echo -e "${YELLOW}☉——————————— [ จัดการบัญชี XRAY CORE ] ——————————☉${NC}"
+echo -e " [6]  สร้างบัญชี Xray (Vmess & Vless)"
+echo -e " [7]  ต่ออายุบัญชี Xray (Renew)"
+echo -e " [8]  ระงับ / ปลดล็อกบัญชี Xray (Lock/Unlock)"
+echo -e " [9]  ลบบัญชี Xray (Vmess & Vless)"
+echo -e " [10] ดูรายชื่อบัญชี Xray และขอดูลิงก์ย้อนหลัง"
+echo -e "${YELLOW}☉——————————— [ ระบบความปลอดภัยและเซิร์ฟเวอร์ ] ——————☉${NC}"
+echo -e " [11] เช็กผู้ใช้ออนไลน์ (SSH / Dropbear / Xray)"
+echo -e " [12] ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
+echo -e " [13] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
+echo -e " [14] เช็กสถานะบริการและไฟร์วอลล์ (running)"
+echo -e " [15] รีสตาร์ทบริการทั้งหมด"
+echo -e " [16] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะ)"
 echo -e " [0]  ออกจากเมนู"
-echo -e "${YELLOW}☉———————————————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-12]: " opt
+echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
+read -rp "เลือกเมนู [0-16]: " opt
 
 case $opt in
     1)
@@ -288,23 +296,43 @@ case $opt in
         echo -e "${YELLOW}=================================${NC}"
         ;;
     2)
-        clear
-        echo -e "${YELLOW}========= รายชื่อบัญชี SSH ทั้งหมด =========${NC}"
-        printf "%-18s %-20s %s\n" "Username" "Expire Date" "Status"
-        echo -e "---------------------------------------------------"
-        for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
-            exp=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
-            passwd_stat=$(passwd -S "$user" 2>/dev/null | awk '{print $2}')
-            if [[ "$passwd_stat" == "L" ]]; then
-                stat="Locked"
-            else
-                stat="Active"
-            fi
-            printf "%-18s %-20s %s\n" "$user" "$exp" "$stat"
-        done
-        echo -e "${YELLOW}=========================================${NC}"
+        read -rp "พิมพ์ชื่อบัญชี SSH ที่ต้องการต่ออายุ: " user
+        if ! id "$user" &>/dev/null; then
+            echo -e "${RED}ไม่พบชื่อบัญชี ${user} ในระบบ!${NC}"
+            exit 1
+        fi
+        read -rp "จำนวนวันที่ต้องการเพิ่ม (เช่น 30): " days
+        exp_old=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
+        today_sec=$(date +%s)
+        exp_sec=$(date -d "$exp_old" +%s 2>/dev/null || echo "$today_sec")
+        if [[ $exp_sec -lt $today_sec ]]; then
+            base_date=$(date +%Y-%m-%d)
+        else
+            base_date=$(date -d "$exp_old" +%Y-%m-%d)
+        fi
+        new_exp=$(date -d "$base_date + $days days" +%Y-%m-%d)
+        chage -E "$new_exp" "$user"
+        echo -e "${GREEN}ต่ออายุบัญชี ${user} สำเร็จ! วันหมดอายุใหม่คือ: ${new_exp}${NC}"
         ;;
     3)
+        echo -e " [1] ระงับบัญชีชั่วคราว (Lock)"
+        echo -e " [2] ปลดล็อกบัญชี (Unlock)"
+        read -rp "เลือกทำรายการ [1-2]: " lopt
+        read -rp "พิมพ์ชื่อบัญชี SSH: " user
+        if ! id "$user" &>/dev/null; then
+            echo -e "${RED}ไม่พบชื่อบัญชี ${user} ในระบบ!${NC}"
+            exit 1
+        fi
+        if [[ "$lopt" == "1" ]]; then
+            passwd -l "$user" >/dev/null 2>&1
+            killall -u "$user" 2>/dev/null
+            echo -e "${YELLOW}ระงับการใช้งานและตัดการเชื่อมต่อบัญชี ${user} เรียบร้อยแล้ว!${NC}"
+        elif [[ "$lopt" == "2" ]]; then
+            passwd -u "$user" >/dev/null 2>&1
+            echo -e "${GREEN}ปลดล็อกบัญชี ${user} ให้กลับมาใช้งานได้ตามปกติแล้ว!${NC}"
+        fi
+        ;;
+    4)
         read -rp "พิมพ์ชื่อบัญชี SSH ที่ต้องการลบ: " delssh
         if id "$delssh" &>/dev/null; then
             killall -u "$delssh" 2>/dev/null
@@ -314,14 +342,30 @@ case $opt in
             echo -e "${RED}ไม่พบชื่อบัญชี ${delssh} ในระบบ!${NC}"
         fi
         ;;
-    4)
+    5)
+        clear
+        echo -e "${YELLOW}========= รายชื่อบัญชี SSH ทั้งหมด =========${NC}"
+        printf "%-18s %-20s %s\n" "Username" "Expire Date" "Status"
+        echo -e "---------------------------------------------------"
+        for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
+            exp=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
+            passwd_stat=$(passwd -S "$user" 2>/dev/null | awk '{print $2}')
+            if [[ "$passwd_stat" == "L" ]]; then
+                stat="${RED}Locked${NC}"
+            else
+                stat="${GREEN}Active${NC}"
+            fi
+            printf "%-18s %-20s %b\n" "$user" "$exp" "$stat"
+        done
+        echo -e "${YELLOW}=========================================${NC}"
+        ;;
+    6)
         read -rp "ตั้งชื่อบัญชี Xray (ห้ามซ้ำ): " user
         if [[ -z "$user" ]]; then
             echo -e "${RED}ชื่อบัญชีห้ามเว้นว่าง!${NC}"
             exit 1
         fi
-        EXISTS=$(jq -r '.inbounds[0].settings.clients[].email' /etc/xray/config.json | grep -w "$user")
-        if [[ -n "$EXISTS" ]]; then
+        if grep -q "^${user}:" /etc/xray/xray-exp.txt; then
             echo -e "${RED}มีชื่อบัญชีนี้อยู่ในระบบแล้ว!${NC}"
             exit 1
         fi
@@ -365,26 +409,64 @@ JSON
         echo -e "${VLESS_NTLS}\n"
         echo -e "${YELLOW}===========================================${NC}"
         ;;
-    5)
-        clear
-        echo -e "${YELLOW}========= รายชื่อบัญชี Xray ทั้งหมด =========${NC}"
-        printf "%-15s %-15s %s\n" "Username" "Expire Date" "UUID"
-        echo -e "---------------------------------------------------"
-        if [ -s /etc/xray/xray-exp.txt ]; then
-            while IFS=':' read -r u exp; do
-                uuid=$(jq -r --arg usr "$u" '.inbounds[0].settings.clients[] | select(.email == $usr) | .id' /etc/xray/config.json)
-                printf "%-15s %-15s %s\n" "$u" "$exp" "$uuid"
-            done < /etc/xray/xray-exp.txt
-        else
-            echo "ยังไม่มีการสร้างบัญชี Xray ในระบบ"
+    7)
+        read -rp "พิมพ์ชื่อบัญชี Xray ที่ต้องการต่ออายุ: " user
+        old_exp=$(grep "^${user}:" /etc/xray/xray-exp.txt | cut -d: -f2)
+        if [[ -z "$old_exp" ]]; then
+            echo -e "${RED}ไม่พบชื่อบัญชี ${user} ในระบบ!${NC}"
+            exit 1
         fi
-        echo -e "${YELLOW}===========================================${NC}"
+        read -rp "จำนวนวันที่ต้องการเพิ่ม (เช่น 30): " days
+        today_sec=$(date +%s)
+        exp_sec=$(date -d "$old_exp" +%s 2>/dev/null || echo "$today_sec")
+        if [[ $exp_sec -lt $today_sec ]]; then
+            base_date=$(date +%Y-%m-%d)
+        else
+            base_date=$(date -d "$old_exp" +%Y-%m-%d)
+        fi
+        new_exp=$(date -d "$base_date + $days days" +%Y-%m-%d)
+        sed -i "s/^${user}:${old_exp}/${user}:${new_exp}/g" /etc/xray/xray-exp.txt
+        echo -e "${GREEN}ต่ออายุบัญชี Xray: ${user} สำเร็จ! วันหมดอายุใหม่คือ: ${new_exp}${NC}"
         ;;
-    6)
-        echo -e "${CYAN}รายชื่อบัญชี Xray ปัจจุบัน:${NC}"
-        jq -r '.inbounds[0].settings.clients[] | "- \(.email) (UUID: \(.id))"' /etc/xray/config.json
-        echo -e "${YELLOW}-------------------------------------------${NC}"
-        read -rp "พิมพ์ชื่อบัญชีที่ต้องการลบ: " deluser
+    8)
+        echo -e " [1] ระงับบัญชี Xray ชั่วคราว (Lock)"
+        echo -e " [2] ปลดล็อกบัญชี Xray (Unlock)"
+        read -rp "เลือกทำรายการ [1-2]: " xlopt
+        read -rp "พิมพ์ชื่อบัญชี Xray: " user
+        if ! grep -q "^${user}:" /etc/xray/xray-exp.txt; then
+            echo -e "${RED}ไม่พบชื่อบัญชี ${user} ในระบบ!${NC}"
+            exit 1
+        fi
+        if [[ "$xlopt" == "1" ]]; then
+            if grep -q "^${user}:" /etc/xray/xray-lock.txt; then
+                echo -e "${YELLOW}บัญชีนี้ถูกระงับอยู่แล้ว!${NC}"
+                exit 1
+            fi
+            uuid=$(jq -r --arg u "$user" '.inbounds[0].settings.clients[] | select(.email == $u) | .id' /etc/xray/config.json)
+            echo "${user}:${uuid}" >> /etc/xray/xray-lock.txt
+            jq --arg u "$user" \
+               '(.inbounds[0].settings.clients) |= map(select(.email != $u)) |
+                (.inbounds[1].settings.clients) |= map(select(.email != $u))' \
+               /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
+            systemctl restart xray
+            echo -e "${YELLOW}ระงับการใช้งานบัญชี Xray: ${user} ชั่วคราวเรียบร้อยแล้ว!${NC}"
+        elif [[ "$xlopt" == "2" ]]; then
+            uuid=$(grep "^${user}:" /etc/xray/xray-lock.txt | cut -d: -f2)
+            if [[ -z "$uuid" ]]; then
+                echo -e "${RED}บัญชีนี้ไม่ได้อยู่ในสถานะถูกระงับ!${NC}"
+                exit 1
+            fi
+            jq --arg u "$user" --arg id "$uuid" \
+               '.inbounds[0].settings.clients += [{"id": $id, "alterId": 0, "email": $u}] |
+                .inbounds[1].settings.clients += [{"id": $id, "email": $u}]' \
+               /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
+            sed -i "/^${user}:/d" /etc/xray/xray-lock.txt
+            systemctl restart xray
+            echo -e "${GREEN}ปลดล็อกบัญชี Xray: ${user} (UUID เดิม) เรียบร้อยแล้ว!${NC}"
+        fi
+        ;;
+    9)
+        read -rp "พิมพ์ชื่อบัญชี Xray ที่ต้องการลบถาวร: " deluser
         if [[ "$deluser" == "default" ]]; then
             echo -e "${RED}ไม่สามารถลบบัญชีเริ่มต้น (default) ได้!${NC}"
             exit 1
@@ -394,10 +476,57 @@ JSON
             (.inbounds[1].settings.clients) |= map(select(.email != $u))' \
            /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
         sed -i "/^$deluser:/d" /etc/xray/xray-exp.txt
+        sed -i "/^$deluser:/d" /etc/xray/xray-lock.txt
         systemctl restart xray
-        echo -e "${GREEN}ลบบัญชี ${deluser} เรียบร้อยแล้ว!${NC}"
+        echo -e "${GREEN}ลบบัญชี ${deluser} ถาวรเรียบร้อยแล้ว!${NC}"
         ;;
-    7)
+    10)
+        clear
+        echo -e "${YELLOW}================= รายชื่อบัญชี Xray ทั้งหมด =================${NC}"
+        printf "%-15s %-15s %-12s %s\n" "Username" "Expire Date" "Status" "UUID"
+        echo -e "------------------------------------------------------------"
+        if [ -s /etc/xray/xray-exp.txt ]; then
+            while IFS=':' read -r u exp; do
+                if grep -q "^${u}:" /etc/xray/xray-lock.txt; then
+                    uuid=$(grep "^${u}:" /etc/xray/xray-lock.txt | cut -d: -f2)
+                    stat="${RED}Locked${NC}"
+                else
+                    uuid=$(jq -r --arg usr "$u" '.inbounds[0].settings.clients[] | select(.email == $usr) | .id' /etc/xray/config.json)
+                    stat="${GREEN}Active${NC}"
+                fi
+                printf "%-15s %-15s %-21b %s\n" "$u" "$exp" "$stat" "$uuid"
+            done < /etc/xray/xray-exp.txt
+        else
+            echo "ยังไม่มีการสร้างบัญชี Xray ในระบบ"
+        fi
+        echo -e "${YELLOW}============================================================${NC}"
+        read -rp "ต้องการดูลิงก์เชื่อมต่อของบัญชีใดไหมครับ? (พิมพ์ชื่อบัญชี หรือกด Enter เพื่อข้าม): " showuser
+        if [[ -n "$showuser" ]]; then
+            UUID=$(jq -r --arg usr "$showuser" '.inbounds[0].settings.clients[] | select(.email == $usr) | .id' /etc/xray/config.json)
+            if [[ -z "$UUID" ]]; then
+                UUID=$(grep "^${showuser}:" /etc/xray/xray-lock.txt | cut -d: -f2)
+            fi
+            if [[ -n "$UUID" ]]; then
+                VMESS_TLS=$(cat <<JSON | base64 -w 0
+{"v":"2","ps":"${showuser}-TLS","add":"${DOMAIN}","port":"443","id":"${UUID}","aid":"0","net":"ws","path":"/vmess","type":"none","host":"${DOMAIN}","tls":"tls"}
+JSON
+)
+                VMESS_NTLS=$(cat <<JSON | base64 -w 0
+{"v":"2","ps":"${showuser}-HTTP","add":"${DOMAIN}","port":"80","id":"${UUID}","aid":"0","net":"ws","path":"/vmess","type":"none","host":"${DOMAIN}","tls":"none"}
+JSON
+)
+                VLESS_TLS="vless://${UUID}@${DOMAIN}:443?path=%2Fvless&security=tls&encryption=none&type=ws&host=${DOMAIN}&sni=${DOMAIN}#${showuser}-TLS"
+                VLESS_NTLS="vless://${UUID}@${DOMAIN}:80?path=%2Fvless&security=none&encryption=none&type=ws&host=${DOMAIN}#${showuser}-HTTP"
+                echo -e "\n${CYAN}[ลิงก์ Vmess SSL/TLS (443)]${NC}\nvmess://${VMESS_TLS}\n"
+                echo -e "${CYAN}[ลิงก์ Vmess HTTP (80)]${NC}\nvmess://${VMESS_NTLS}\n"
+                echo -e "${CYAN}[ลิงก์ Vless SSL/TLS (443)]${NC}\n${VLESS_TLS}\n"
+                echo -e "${CYAN}[ลิงก์ Vless HTTP (80)]${NC}\n${VLESS_NTLS}\n"
+            else
+                echo -e "${RED}ไม่พบบัญชี ${showuser}${NC}"
+            fi
+        fi
+        ;;
+    11)
         clear
         echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (OpenSSH & SSH-WS) ===${NC}"
         printf "%-18s %-15s %s\n" "Username" "จำนวนที่เชื่อมต่อ" "PID"
@@ -414,12 +543,9 @@ JSON
                 has_online=1
             fi
         done
-        if [[ $has_online -eq 0 ]]; then
-            echo "ไม่มีผู้ใช้ออนไลน์ผ่าน OpenSSH / SSH-WS ในขณะนี้"
-        fi
+        [[ $has_online -eq 0 ]] && echo "ไม่มีผู้ใช้ออนไลน์ผ่าน OpenSSH / SSH-WS ในขณะนี้"
 
-        echo -e ""
-        echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (Dropbear Port 109/143) ===${NC}"
+        echo -e "\n${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (Dropbear Port 109/143) ===${NC}"
         db_pids=$(ps aux | grep -i dropbear | awk '{print $2}')
         has_db=0
         for pid in $db_pids; do
@@ -430,21 +556,33 @@ JSON
                 has_db=1
             fi
         done
-        if [[ $has_db -eq 0 ]]; then
-            echo "ไม่มีผู้ใช้ออนไลน์ผ่าน Dropbear ในขณะนี้"
+        [[ $has_db -eq 0 ]] && echo "ไม่มีผู้ใช้ออนไลน์ผ่าน Dropbear ในขณะนี้"
+
+        echo -e "\n${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ล่าสุด (Xray Vmess/Vless) ===${NC}"
+        if [ -s /var/log/xray/access.log ]; then
+            xray_active=$(tail -n 300 /var/log/xray/access.log | grep "email:" | awk -F"email: " '{print $2}' | sort -u)
+            if [[ -n "$xray_active" ]]; then
+                for xusr in $xray_active; do
+                    last_time=$(tail -n 300 /var/log/xray/access.log | grep "email: $xusr" | tail -n 1 | awk '{print $1, $2}')
+                    echo -e "- บัญชี: ${GREEN}${xusr}${NC} (ใช้งานล่าสุด: ${last_time})"
+                done
+            else
+                echo "ไม่มีความเคลื่อนไหวของบัญชี Xray ในช่วงเวลานี้"
+            fi
+        else
+            echo "ยังไม่มีข้อมูลการเชื่อมต่อ Xray"
         fi
 
-        echo -e ""
-        echo -e "${YELLOW}=== ประวัติการเตะล็อกอินซ้อน 10 รายการล่าสุด ===${NC}"
+        echo -e "\n${YELLOW}=== ประวัติการเตะล็อกอินซ้อน 10 รายการล่าสุด ===${NC}"
         tail -n 10 /var/log/autokill.log 2>/dev/null || echo "ยังไม่มีประวัติการทำผิดกฎ"
         echo -e "${YELLOW}===================================================${NC}"
         ;;
-    8)
+    12)
         read -rp "กำหนดจำนวนเครื่องสูงสุดต่อ 1 บัญชี (เช่น 2, ใส่ 0 เพื่อปิด): " max_num
         echo "$max_num" > /etc/xray/limit-ssh
         echo -e "${GREEN}บันทึกการจำกัดล็อกอินไว้ที่ ${max_num} เครื่อง เรียบร้อยแล้ว!${NC}"
         ;;
-    9)
+    13)
         read -rp "กรอกโดเมนใหม่ของคุณ (ชี้ IP มายังเซิร์ฟเวอร์นี้แล้ว): " newdom
         if [[ -z "$newdom" ]]; then
             echo -e "${RED}ยกเลิกการทำรายการ${NC}"
@@ -462,14 +600,14 @@ JSON
         systemctl restart xray
         echo -e "${GREEN}อัปเดตโดเมนและติดตั้ง SSL พอร์ต 443 เรียบร้อยแล้ว!${NC}"
         ;;
-    10)
+    14)
         running
         ;;
-    11)
+    15)
         systemctl restart ssh dropbear nginx xray ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
-    12)
+    16)
         echo -e "${CYAN}กำลังสแกนหาและลบบัญชีที่หมดอายุ...${NC}"
         /usr/bin/xp
         echo -e "${GREEN}เคลียร์บัญชีหมดอายุเสร็จสิ้น!${NC}"
@@ -484,4 +622,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "SSH, VPN, Menu & Security Suite Installed Successfully!"
+echo "SSH, VPN, Security & Advanced User Manager Installed Successfully!"
