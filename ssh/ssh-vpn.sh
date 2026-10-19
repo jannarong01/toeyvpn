@@ -1,7 +1,7 @@
 #!/bin/bash
-# ===============================================================
-#  SSH, DROPBEAR, BADVPN, SECURITY, USER MANAGER & MAINTENANCE
-# ===============================================================
+# =====================================================================
+#  SSH, DROPBEAR, BADVPN, ZIVPN UDP, SECURITY & MAINTENANCE SUITE
+# =====================================================================
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. ลบ Apache2 และ UFW ป้องกันการแย่งพอร์ต 80
@@ -40,15 +40,87 @@ EOF
 systemctl enable fail2ban >/dev/null 2>&1
 systemctl restart fail2ban
 
-# 5. ตั้งค่า Iptables บล็อก BitTorrent / P2P (เช็กก่อนเพิ่มเพื่อป้องกันกฎซ้ำซ้อนตอนอัปเดต)
+# 5. ตั้งค่า Iptables บล็อก BitTorrent / P2P
 for keyword in "get_peers" "announce_peer" "find_node" "BitTorrent" "BitTorrent protocol" "peer_id=" ".torrent" "announce.php?passkey=" "torrent" "announce" "info_hash"; do
     iptables -C FORWARD -m string --string "$keyword" --algo bm -j DROP 2>/dev/null || iptables -A FORWARD -m string --string "$keyword" --algo bm -j DROP
     iptables -C OUTPUT -m string --string "$keyword" --algo bm -j DROP 2>/dev/null || iptables -A OUTPUT -m string --string "$keyword" --algo bm -j DROP
 done
+
+# 6. ติดตั้ง ZIVPN UDP Tunnel (พอร์ต 5667 และ 6000-19999)
+mkdir -p /etc/zivpn
+touch /etc/zivpn/zivpn-exp.txt
+
+if [ ! -s /usr/local/bin/zivpn-udp ]; then
+    echo "กำลังติดตั้ง ZIVPN UDP Server..."
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "x86_64" ]]; then
+        wget -q -O /usr/local/bin/zivpn-udp "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64"
+    elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+        wget -q -O /usr/local/bin/zivpn-udp "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-arm64"
+    fi
+    chmod +x /usr/local/bin/zivpn-udp
+fi
+
+if [ ! -s /etc/zivpn/zivpn.crt ]; then
+    openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+        -subj "/C=TH/ST=Bangkok/L=Bangkok/O=ZIVPN/CN=zivpn" \
+        -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt" >/dev/null 2>&1
+fi
+
+sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1
+sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1
+
+if [ ! -s /etc/zivpn/config.json ]; then
+cat <<EOF > /etc/zivpn/config.json
+{
+  "listen": ":5667",
+  "cert": "/etc/zivpn/zivpn.crt",
+  "key": "/etc/zivpn/zivpn.key",
+  "obfs": "zivpn",
+  "auth": {
+    "mode": "passwords",
+    "config": [
+      "zivpn-default"
+    ]
+  }
+}
+EOF
+fi
+
+cat <<EOF > /etc/systemd/system/zivpn.service
+[Unit]
+Description=ZIVPN UDP Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/zivpn
+ExecStart=/usr/local/bin/zivpn-udp server -c /etc/zivpn/config.json
+Restart=always
+RestartSec=3
+Environment=ZIVPN_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
+iptables -t nat -C PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || \
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
+iptables -C INPUT -p udp --dport 5667 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 5667 -j ACCEPT
+iptables -C INPUT -p udp --dport 6000:19999 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 6000:19999 -j ACCEPT
 netfilter-persistent save >/dev/null 2>&1
 netfilter-persistent reload >/dev/null 2>&1
 
-# 6. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
+systemctl daemon-reload
+systemctl enable zivpn >/dev/null 2>&1
+systemctl restart zivpn
+
+# 7. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
     echo "กำลังติดตั้ง BadVPN UDPGW..."
     wget -q -O /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
@@ -93,7 +165,7 @@ for port in 7100 7200 7300; do
     systemctl restart udpgw@${port}
 done
 
-# 7. ตั้งค่า Dropbear ให้ทำงานที่พอร์ต 109 และ 143
+# 8. ตั้งค่า Dropbear ให้ทำงานที่พอร์ต 109 และ 143
 cat <<EOF > /etc/default/dropbear
 NO_START=0
 DROPBEAR_PORT=143
@@ -112,7 +184,7 @@ EOF
 systemctl enable dropbear >/dev/null 2>&1
 systemctl restart dropbear
 
-# 8. สร้างสคริปต์ลบบัญชีหมดอายุอัตโนมัติ (xp)
+# 9. สร้างสคริปต์ลบบัญชีหมดอายุอัตโนมัติ (xp)
 cat << 'EOF' > /usr/bin/xp
 #!/bin/bash
 export LC_ALL=en_US.UTF-8
@@ -146,10 +218,22 @@ if [ -f /etc/xray/xray-exp.txt ]; then
         fi
     done < /etc/xray/xray-exp.txt
 fi
+
+if [ -f /etc/zivpn/zivpn-exp.txt ]; then
+    while IFS=':' read -r z_pass z_exp; do
+        exp_sec=$(date -d "$z_exp" +%s)
+        if [[ $today_sec -ge $exp_sec ]]; then
+            jq --arg p "$z_pass" '.auth.config -= [$p]' /etc/zivpn/config.json > /tmp/zivpn_tmp.json && mv /tmp/zivpn_tmp.json /etc/zivpn/config.json
+            sed -i "/^$z_pass:/d" /etc/zivpn/zivpn-exp.txt
+            systemctl restart zivpn
+            echo "Deleted Expired ZIVPN Password: $z_pass"
+        fi
+    done < /etc/zivpn/zivpn-exp.txt
+fi
 EOF
 chmod +x /usr/bin/xp
 
-# 9. สร้างสคริปต์เตะคนล็อกอินซ้อนเกินกำหนด (tendang) และสคริปต์ล้างขยะ (clear-log)
+# 10. สร้างสคริปต์เตะคนล็อกอินซ้อนเกินกำหนด (tendang) และสคริปต์ล้างขยะ (clear-log)
 mkdir -p /etc/xray
 [ ! -f /etc/xray/limit-ssh ] && echo "2" > /etc/xray/limit-ssh
 [ ! -f /etc/xray/autoreboot-status ] && echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)" > /etc/xray/autoreboot-status
@@ -201,7 +285,7 @@ EOF
 fi
 systemctl restart cron
 
-# 10. สร้างคำสั่งเช็กสถานะ 'running'
+# 11. สร้างคำสั่งเช็กสถานะ 'running'
 cat << 'EOF' > /usr/bin/running
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -235,6 +319,7 @@ echo -e " OpenSSH Service          : $(check_status ssh)"
 echo -e " Dropbear Service         : $(check_status dropbear)"
 echo -e " Nginx Proxy (80 / 443)   : $(check_status nginx)"
 echo -e " Xray Core (Vmess/Vless)  : $(check_status xray)"
+echo -e " ZIVPN UDP (5667/6000+)   : $(check_status zivpn)"
 echo -e " SSH WebSocket (10015)    : $(check_status ws-epro)"
 echo -e " BadVPN UDPGW (7300)      : $(check_status udpgw@7300)"
 echo -e " Fail2Ban (Anti-Brute)    : $(check_status fail2ban)"
@@ -245,7 +330,7 @@ echo -e "${YELLOW}=========================================${NC}"
 EOF
 chmod +x /usr/bin/running
 
-# 11. สร้างคำสั่งหน้าหลัก 'menu'
+# 12. สร้างคำสั่งหน้าหลัก 'menu'
 cat << 'EOF' > /usr/bin/menu
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -259,8 +344,8 @@ DOMAIN=$(cat /etc/xray/domain 2>/dev/null || echo "$MYIP")
 MAX_LOGIN=$(cat /etc/xray/limit-ssh 2>/dev/null || echo "2")
 REBOOT_STAT=$(cat /etc/xray/autoreboot-status 2>/dev/null || echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)")
 RAM_USAGE=$(free -m | awk 'NR==2{printf "%s/%s MB (%.1f%%)", $3,$2,$3*100/$2 }')
-mkdir -p /etc/xray
-touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt
+mkdir -p /etc/xray /etc/zivpn
+touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt
 
 clear
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
@@ -283,20 +368,24 @@ echo -e " [7]  ต่ออายุบัญชี Xray (Renew)"
 echo -e " [8]  ระงับ / ปลดล็อกบัญชี Xray (Lock/Unlock)"
 echo -e " [9]  ลบบัญชี Xray (Vmess & Vless)"
 echo -e " [10] ดูรายชื่อบัญชี Xray และขอดูลิงก์ย้อนหลัง"
-echo -e "${YELLOW}☉——————————— [ ระบบความปลอดภัยและเซิร์ฟเวอร์ ] ——————☉${NC}"
-echo -e " [11] เช็กผู้ใช้ออนไลน์ (SSH / Dropbear / Xray)"
-echo -e " [12] ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
-echo -e " [13] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
-echo -e " [14] เช็กสถานะบริการและไฟร์วอลล์ (running)"
-echo -e " [15] รีสตาร์ทบริการทั้งหมด"
-echo -e " [16] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะบัญชี)"
-echo -e "${YELLOW}☉——————————— [ บำรุงรักษาเซิร์ฟเวอร์ ] —————————————☉${NC}"
-echo -e " [17] ล้างไฟล์ขยะ Log และเคลียร์ RAM ทันที"
-echo -e " [18] ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ"
-echo -e " [19] อัปเดตสคริปต์และเมนูเวอร์ชันล่าสุดจาก GitHub"
+echo -e "${YELLOW}☉——————————— [ จัดการบัญชี ZIVPN UDP ] ——————————☉${NC}"
+echo -e " [11] สร้างรหัสผ่าน ZIVPN UDP (Create Password)"
+echo -e " [12] ต่ออายุรหัสผ่าน ZIVPN UDP (Renew)"
+echo -e " [13] ลบรหัสผ่าน ZIVPN UDP (Delete)"
+echo -e " [14] ดูรหัสผ่าน ZIVPN UDP ทั้งหมด"
+echo -e "${YELLOW}☉——————————— [ ระบบความปลอดภัยและบำรุงรักษา ] —————☉${NC}"
+echo -e " [15] เช็กผู้ใช้ออนไลน์ (SSH / Dropbear / Xray)"
+echo -e " [16] ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
+echo -e " [17] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
+echo -e " [18] เช็กสถานะบริการและไฟร์วอลล์ (running)"
+echo -e " [19] รีสตาร์ทบริการทั้งหมด"
+echo -e " [20] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะบัญชี)"
+echo -e " [21] ล้างไฟล์ขยะ Log และเคลียร์ RAM ทันที"
+echo -e " [22] ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ"
+echo -e " [23] อัปเดตสคริปต์และเมนูเวอร์ชันล่าสุดจาก GitHub"
 echo -e " [0]  ออกจากเมนู"
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-19]: " opt
+read -rp "เลือกเมนู [0-23]: " opt
 
 case $opt in
     1)
@@ -556,6 +645,77 @@ JSON
         fi
         ;;
     11)
+        read -rp "กำหนดรหัสผ่าน (udp password) [กด Enter เพื่อสุ่มอัตโนมัติ 8 หลัก]: " zpass
+        if [[ -z "$zpass" ]]; then
+            zpass=$(openssl rand -hex 4)
+        fi
+        if grep -q "^${zpass}:" /etc/zivpn/zivpn-exp.txt; then
+            echo -e "${RED}รหัสผ่านนี้มีอยู่ในระบบแล้ว!${NC}"
+            exit 1
+        fi
+        read -rp "จำนวนวันที่ใช้งาน (เช่น 30): " days
+        exp=$(date -d "$days days" +"%Y-%m-%d")
+
+        jq --arg p "$zpass" '.auth.config += [$p]' /etc/zivpn/config.json > /tmp/zivpn_tmp.json && mv /tmp/zivpn_tmp.json /etc/zivpn/config.json
+        echo "${zpass}:${exp}" >> /etc/zivpn/zivpn-exp.txt
+        systemctl restart zivpn
+
+        clear
+        echo -e "${YELLOW}====== ข้อมูลการเชื่อมต่อ ZIVPN (UDP Tunnel) ======${NC}"
+        echo -e "Receive window : ${GREEN}3 (หรือค่าเริ่มต้น)${NC}"
+        echo -e "udp server     : ${GREEN}${DOMAIN}${NC} (หรือ ${MYIP})"
+        echo -e "udp password   : ${GREEN}${zpass}${NC}"
+        echo -e "Port Range     : 5667, 6000-19999 (UDP)"
+        echo -e "หมดอายุวันที่     : ${GREEN}${exp} (${days} วัน)${NC}"
+        echo -e "${YELLOW}=================================================${NC}"
+        ;;
+    12)
+        read -rp "พิมพ์รหัสผ่าน ZIVPN (udp password) ที่ต้องการต่ออายุ: " zpass
+        old_exp=$(grep "^${zpass}:" /etc/zivpn/zivpn-exp.txt | cut -d: -f2)
+        if [[ -z "$old_exp" ]]; then
+            echo -e "${RED}ไม่พบรหัสผ่าน ${zpass} ในระบบ!${NC}"
+            exit 1
+        fi
+        read -rp "จำนวนวันที่ต้องการเพิ่ม (เช่น 30): " days
+        today_sec=$(date +%s)
+        exp_sec=$(date -d "$old_exp" +%s 2>/dev/null || echo "$today_sec")
+        if [[ $exp_sec -lt $today_sec ]]; then
+            base_date=$(date +%Y-%m-%d)
+        else
+            base_date=$(date -d "$old_exp" +%Y-%m-%d)
+        fi
+        new_exp=$(date -d "$base_date + $days days" +%Y-%m-%d)
+        sed -i "s/^${zpass}:${old_exp}/${zpass}:${new_exp}/g" /etc/zivpn/zivpn-exp.txt
+        echo -e "${GREEN}ต่ออายุรหัสผ่าน ZIVPN: ${zpass} สำเร็จ! วันหมดอายุใหม่คือ: ${new_exp}${NC}"
+        ;;
+    13)
+        read -rp "พิมพ์รหัสผ่าน ZIVPN (udp password) ที่ต้องการลบ: " delpass
+        if grep -q "^${delpass}:" /etc/zivpn/zivpn-exp.txt; then
+            jq --arg p "$delpass" '.auth.config -= [$p]' /etc/zivpn/config.json > /tmp/zivpn_tmp.json && mv /tmp/zivpn_tmp.json /etc/zivpn/config.json
+            sed -i "/^${delpass}:/d" /etc/zivpn/zivpn-exp.txt
+            systemctl restart zivpn
+            echo -e "${GREEN}ลบรหัสผ่าน ZIVPN: ${delpass} เรียบร้อยแล้ว!${NC}"
+        else
+            echo -e "${RED}ไม่พบรหัสผ่าน ${delpass} ในระบบ!${NC}"
+        fi
+        ;;
+    14)
+        clear
+        echo -e "${YELLOW}========= รายชื่อรหัสผ่าน ZIVPN UDP ทั้งหมด =========${NC}"
+        echo -e "UDP Server : ${GREEN}${DOMAIN}${NC} (${MYIP})"
+        echo -e "---------------------------------------------------"
+        printf "%-22s %-18s %s\n" "UDP Password" "Expire Date" "Status"
+        echo -e "---------------------------------------------------"
+        if [ -s /etc/zivpn/zivpn-exp.txt ]; then
+            while IFS=':' read -r zp zexp; do
+                printf "%-22s %-18s %b\n" "$zp" "$zexp" "${GREEN}Active${NC}"
+            done < /etc/zivpn/zivpn-exp.txt
+        else
+            echo "ยังไม่มีการสร้างรหัสผ่าน ZIVPN ในระบบ"
+        fi
+        echo -e "${YELLOW}===================================================${NC}"
+        ;;
+    15)
         clear
         echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (OpenSSH & SSH-WS) ===${NC}"
         printf "%-18s %-15s %s\n" "Username" "จำนวนที่เชื่อมต่อ" "PID"
@@ -606,12 +766,12 @@ JSON
         tail -n 10 /var/log/autokill.log 2>/dev/null || echo "ยังไม่มีประวัติการทำผิดกฎ"
         echo -e "${YELLOW}===================================================${NC}"
         ;;
-    12)
+    16)
         read -rp "กำหนดจำนวนเครื่องสูงสุดต่อ 1 บัญชี (เช่น 2, ใส่ 0 เพื่อปิด): " max_num
         echo "$max_num" > /etc/xray/limit-ssh
         echo -e "${GREEN}บันทึกการจำกัดล็อกอินไว้ที่ ${max_num} เครื่อง เรียบร้อยแล้ว!${NC}"
         ;;
-    13)
+    17)
         read -rp "กรอกโดเมนใหม่ของคุณ (ชี้ IP มายังเซิร์ฟเวอร์นี้แล้ว): " newdom
         if [[ -z "$newdom" ]]; then
             echo -e "${RED}ยกเลิกการทำรายการ${NC}"
@@ -629,26 +789,26 @@ JSON
         systemctl restart xray
         echo -e "${GREEN}อัปเดตโดเมนและติดตั้ง SSL พอร์ต 443 เรียบร้อยแล้ว!${NC}"
         ;;
-    14)
+    18)
         running
         ;;
-    15)
-        systemctl restart ssh dropbear nginx xray ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
+    19)
+        systemctl restart ssh dropbear nginx xray zivpn ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
-    16)
+    20)
         echo -e "${CYAN}กำลังสแกนหาและลบบัญชีที่หมดอายุ...${NC}"
         /usr/bin/xp
         echo -e "${GREEN}เคลียร์บัญชีหมดอายุเสร็จสิ้น!${NC}"
         ;;
-    17)
+    21)
         echo -e "${CYAN}กำลังล้างไฟล์ Log และเคลียร์ RAM Cache...${NC}"
         BEFORE_RAM=$(free -m | awk 'NR==2{print $3}')
         /usr/bin/clear-log
         AFTER_RAM=$(free -m | awk 'NR==2{print $3}')
         echo -e "${GREEN}ล้างไฟล์ขยะและเคลียร์ RAM สำเร็จ! (RAM ที่ใช้งานลดลงจาก ${BEFORE_RAM} MB เหลือ ${AFTER_RAM} MB)${NC}"
         ;;
-    18)
+    22)
         echo -e "${YELLOW}=== ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ ===${NC}"
         echo -e " [1] รีบูตทุกวัน เวลา 03:00 น. (แนะนำ)"
         echo -e " [2] รีบูตทุกวัน เวลา 05:00 น."
@@ -682,7 +842,7 @@ JSON
         esac
         systemctl restart cron
         ;;
-    19)
+    23)
         echo -e "${CYAN}กำลังดึงไฟล์อัปเดตล่าสุดจาก GitHub (jannarong01/toeyvpn)...${NC}"
         wget -q -O /root/update-vpn.sh "https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh"
         if [ -s /root/update-vpn.sh ]; then
@@ -706,4 +866,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "SSH, VPN, Security, User Manager & Maintenance Suite Installed Successfully!"
+echo "SSH, VPN, ZIVPN UDP, Security & Maintenance Suite Installed Successfully!"
