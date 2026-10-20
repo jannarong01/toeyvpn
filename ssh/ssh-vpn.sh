@@ -1,6 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 #  ALL-IN-ONE VPN SUITE: SSH, ZIVPN, HYSTERIA 2, WEB API, SECURITY & BACKUP
+#  Support: Ubuntu 20.04 / 22.04 / 24.04 LTS & Debian 10 / 11 / 12
 # ==============================================================================
 export DEBIAN_FRONTEND=noninteractive
 
@@ -13,11 +14,16 @@ apt-get autoremove -y >/dev/null 2>&1
 # 2. ตั้งค่า Timezone เป็นเวลาไทย
 ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
 
-# 3. ติดตั้งแพ็กเกจหลัก + PHP-FPM + Fail2Ban + Iptables-Persistent + Zip/Unzip
+# 3. ติดตั้งแพ็กเกจหลัก + PHP-FPM + Fail2Ban + Iptables-Persistent + Zip/Unzip + Rsyslog
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix php-fpm php-cli php-curl zip unzip
+apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix php-fpm php-cli php-curl zip unzip rsyslog
+
+# เปิดใช้งาน rsyslog และเตรียมไฟล์ Log สำหรับ Ubuntu 24.04 และ Debian 12
+touch /var/log/auth.log /var/log/syslog
+systemctl enable rsyslog >/dev/null 2>&1
+systemctl restart rsyslog
 
 # 4. ตั้งค่าระบบป้องกันการสุ่มรหัสผ่าน (Fail2Ban)
 cat <<EOF > /etc/fail2ban/jail.local
@@ -29,13 +35,14 @@ maxretry = 5
 [sshd]
 enabled = true
 port = 22
-logpath = %(sshd_log)s
-backend = %(sshd_backend)s
+logpath = /var/log/auth.log
+backend = auto
 
 [dropbear]
 enabled = true
 port = 109,143
 logpath = /var/log/auth.log
+backend = auto
 EOF
 systemctl enable fail2ban >/dev/null 2>&1
 systemctl restart fail2ban
@@ -1333,7 +1340,7 @@ JSON
         running
         ;;
     23)
-        systemctl restart ssh dropbear nginx php*-fpm xray zivpn hysteria ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
+        systemctl restart rsyslog ssh dropbear nginx php*-fpm xray zivpn hysteria ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
     24)
