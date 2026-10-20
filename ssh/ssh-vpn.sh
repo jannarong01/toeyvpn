@@ -1,7 +1,7 @@
 #!/bin/bash
-# ==========================================================================
-#  SSH, DROPBEAR, BADVPN, ZIVPN UDP, WEB API (8081), SECURITY & MAINTENANCE
-# ==========================================================================
+# ==============================================================================
+#  ALL-IN-ONE VPN SUITE: SSH, ZIVPN UDP, HYSTERIA 2, WEB API (8081) & SECURITY
+# ==============================================================================
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. ลบ Apache2 และ UFW ป้องกันการแย่งพอร์ต 80
@@ -46,10 +46,186 @@ for keyword in "get_peers" "announce_peer" "find_node" "BitTorrent" "BitTorrent 
     iptables -C OUTPUT -m string --string "$keyword" --algo bm -j DROP 2>/dev/null || iptables -A OUTPUT -m string --string "$keyword" --algo bm -j DROP
 done
 
-# 6. ติดตั้งระบบ Web API (Port 8081) เชื่อมต่อทั้ง SSH และ ZIVPN UDP อัตโนมัติ
-mkdir -p /etc/zivpn /home/vps/public_html /root/vnext_api
-touch /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt
+# 6. เตรียมโฟลเดอร์หลักและใบรับรอง SSL เบื้องต้น (กรณีรันก่อน ins-xray.sh)
+mkdir -p /etc/xray /etc/zivpn /etc/hysteria /home/vps/public_html /root/vnext_api
+touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
+MYIP=$(curl -sS ipv4.icanhazip.com)
+DOMAIN=$(cat /etc/xray/domain 2>/dev/null || echo "$MYIP")
+
+if [[ ! -s /etc/xray/xray.crt || ! -s /etc/xray/xray.key ]]; then
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/xray/xray.key \
+        -out /etc/xray/xray.crt \
+        -subj "/C=TH/ST=Bangkok/L=Bangkok/O=PrivateVPN/CN=${DOMAIN}" >/dev/null 2>&1
+    chmod 644 /etc/xray/xray.crt /etc/xray/xray.key
+fi
+
+# 7. ติดตั้ง Hysteria 2 (UDP Port 8443 และ Port Hopping 20000-50000)
+if [ ! -s /usr/local/bin/hysteria ]; then
+    echo "กำลังติดตั้ง Hysteria 2 Server..."
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "x86_64" ]]; then
+        wget -q -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64"
+    elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+        wget -q -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-arm64"
+    fi
+    chmod +x /usr/local/bin/hysteria
+fi
+
+# สคริปต์ตรวจสอบรหัสผ่าน Hysteria 2 (รองรับทั้งแบบใส่เฉพาะ Password อย่างเดียว และ user:pass)
+cat << 'EOF' > /usr/bin/hys-auth
+#!/bin/bash
+ADDR="$1"
+AUTH="$2"
+TX="$3"
+
+MATCH_USER=$(awk -F: -v p="$AUTH" '$2 == p {print $1; exit}' /etc/hysteria/hys-users.txt)
+
+if [[ -z "$MATCH_USER" && "$AUTH" == *:* ]]; then
+    u="${AUTH%%:*}"
+    p="${AUTH#*:}"
+    MATCH_USER=$(awk -F: -v usr="$u" -v pas="$p" '$1 == usr && $2 == pas {print $1; exit}' /etc/hysteria/hys-users.txt)
+fi
+
+if [[ -n "$MATCH_USER" ]]; then
+    echo "$MATCH_USER"
+    exit 0
+else
+    exit 1
+fi
+EOF
+chmod +x /usr/bin/hys-auth
+
+# สคริปต์สร้างไฟล์ตั้งค่า Hysteria 2
+cat << 'EOF' > /usr/bin/rebuild-hysteria
+#!/bin/bash
+mkdir -p /etc/hysteria
+touch /etc/hysteria/hys-users.txt
+
+cat <<YAML > /etc/hysteria/config.yaml
+listen: :8443
+
+tls:
+  cert: /etc/xray/xray.crt
+  key: /etc/xray/xray.key
+
+auth:
+  type: command
+  command: /usr/bin/hys-auth
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.bing.com/
+    rewriteHost: true
+YAML
+
+systemctl restart hysteria >/dev/null 2>&1
+EOF
+chmod +x /usr/bin/rebuild-hysteria
+
+cat <<EOF > /etc/systemd/system/hysteria.service
+[Unit]
+Description=Hysteria 2 Server Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/hysteria
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+Restart=always
+RestartSec=3
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+/usr/bin/rebuild-hysteria
+systemctl daemon-reload
+systemctl enable hysteria >/dev/null 2>&1
+systemctl restart hysteria
+
+# 8. ติดตั้ง ZIVPN UDP Tunnel (พอร์ต 5667 และ 6000-19999)
+if [ ! -s /usr/local/bin/zivpn-udp ]; then
+    echo "กำลังติดตั้ง ZIVPN UDP Server..."
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "x86_64" ]]; then
+        wget -q -O /usr/local/bin/zivpn-udp "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64"
+    elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+        wget -q -O /usr/local/bin/zivpn-udp "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-arm64"
+    fi
+    chmod +x /usr/local/bin/zivpn-udp
+fi
+
+if [ ! -s /etc/zivpn/zivpn.crt ]; then
+    openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+        -subj "/C=TH/ST=Bangkok/L=Bangkok/O=ZIVPN/CN=zivpn" \
+        -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt" >/dev/null 2>&1
+fi
+
+sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1
+sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1
+
+if [ ! -s /etc/zivpn/config.json ]; then
+cat <<EOF > /etc/zivpn/config.json
+{
+  "listen": ":5667",
+  "cert": "/etc/zivpn/zivpn.crt",
+  "key": "/etc/zivpn/zivpn.key",
+  "obfs": "zivpn",
+  "auth": {
+    "mode": "passwords",
+    "config": [
+      "zivpn-default"
+    ]
+  }
+}
+EOF
+fi
+
+cat <<EOF > /etc/systemd/system/zivpn.service
+[Unit]
+Description=ZIVPN UDP Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/zivpn
+ExecStart=/usr/local/bin/zivpn-udp server -c /etc/zivpn/config.json
+Restart=always
+RestartSec=3
+Environment=ZIVPN_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable zivpn >/dev/null 2>&1
+systemctl restart zivpn
+
+# 9. ตั้งค่า Iptables Port Forwarding สำหรับ ZIVPN UDP และ Hysteria 2
+NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
+# กฎสำหรับ ZIVPN (6000-19999 -> 5667)
+iptables -t nat -C PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || \
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
+iptables -C INPUT -p udp --dport 5667 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 5667 -j ACCEPT
+iptables -C INPUT -p udp --dport 6000:19999 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 6000:19999 -j ACCEPT
+
+# กฎสำหรับ Hysteria 2 (20000-50000 -> 8443)
+iptables -t nat -C PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443 2>/dev/null || \
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443
+iptables -C INPUT -p udp --dport 8443 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 8443 -j ACCEPT
+iptables -C INPUT -p udp --dport 20000:50000 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 20000:50000 -j ACCEPT
+
+# 10. ติดตั้งระบบ Web API (Port 8081) เชื่อมต่อทั้ง SSH, ZIVPN UDP และ Hysteria 2 อัตโนมัติ
 cat << 'EOF' > /usr/bin/api-vpn
 #!/bin/bash
 ACTION=$1
@@ -57,13 +233,15 @@ USER=$2
 PASS=$3
 EXP=$4
 
-mkdir -p /etc/zivpn
-touch /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt
+mkdir -p /etc/zivpn /etc/hysteria
+touch /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
 if [[ "$ACTION" == "add" ]]; then
+    # 1. สร้างบัญชี SSH / WebSocket
     /usr/sbin/useradd -e "$EXP" -s /bin/false -M "$USER" 2>/dev/null
     echo "$USER:$PASS" | /usr/sbin/chpasswd 2>/dev/null
 
+    # 2. เพิ่มรหัสผ่านเข้า ZIVPN UDP
     if [[ -n "$PASS" && -f /etc/zivpn/config.json ]]; then
         jq --arg p "$PASS" '.auth.config += [$p] | .auth.config |= unique' /etc/zivpn/config.json > /tmp/zivpn_tmp.json && mv /tmp/zivpn_tmp.json /etc/zivpn/config.json
         sed -i "/^${PASS}:/d" /etc/zivpn/zivpn-exp.txt
@@ -73,9 +251,18 @@ if [[ "$ACTION" == "add" ]]; then
         systemctl restart zivpn >/dev/null 2>&1
     fi
 
+    # 3. เพิ่มบัญชีเข้า Hysteria 2
+    if [[ -n "$USER" && -n "$PASS" ]]; then
+        sed -i "/^${USER}:/d" /etc/hysteria/hys-users.txt
+        echo "${USER}:${PASS}:${EXP}" >> /etc/hysteria/hys-users.txt
+        /usr/bin/rebuild-hysteria
+    fi
+
 elif [[ "$ACTION" == "renew" ]]; then
+    # 1. ต่ออายุ SSH
     /usr/bin/chage -E "$EXP" "$USER" 2>/dev/null
 
+    # 2. ต่ออายุ ZIVPN UDP
     ZPASS=$(grep "^${USER}:" /etc/zivpn/zivpn-users.txt | cut -d: -f2 | tail -n 1)
     [[ -z "$ZPASS" && -n "$PASS" ]] && ZPASS="$PASS"
     if [[ -n "$ZPASS" && -f /etc/zivpn/zivpn-exp.txt ]]; then
@@ -87,10 +274,21 @@ elif [[ "$ACTION" == "renew" ]]; then
         fi
     fi
 
+    # 3. ต่ออายุ Hysteria 2
+    HPASS=$(grep "^${USER}:" /etc/hysteria/hys-users.txt | cut -d: -f2 | tail -n 1)
+    [[ -z "$HPASS" && -n "$ZPASS" ]] && HPASS="$ZPASS"
+    if [[ -n "$HPASS" ]]; then
+        sed -i "/^${USER}:/d" /etc/hysteria/hys-users.txt
+        echo "${USER}:${HPASS}:${EXP}" >> /etc/hysteria/hys-users.txt
+        /usr/bin/rebuild-hysteria
+    fi
+
 elif [[ "$ACTION" == "delete" ]]; then
+    # 1. ลบ SSH
     /usr/bin/killall -u "$USER" 2>/dev/null
     /usr/sbin/userdel -f "$USER" 2>/dev/null
 
+    # 2. ลบ ZIVPN UDP
     ZPASS=$(grep "^${USER}:" /etc/zivpn/zivpn-users.txt | cut -d: -f2 | tail -n 1)
     sed -i "/^${USER}:/d" /etc/zivpn/zivpn-users.txt
     if [[ -n "$ZPASS" && -f /etc/zivpn/config.json ]]; then
@@ -100,12 +298,18 @@ elif [[ "$ACTION" == "delete" ]]; then
             systemctl restart zivpn >/dev/null 2>&1
         fi
     fi
+
+    # 3. ลบ Hysteria 2
+    if grep -q "^${USER}:" /etc/hysteria/hys-users.txt; then
+        sed -i "/^${USER}:/d" /etc/hysteria/hys-users.txt
+        /usr/bin/rebuild-hysteria
+    fi
 fi
 EOF
 chmod +x /usr/bin/api-vpn
 
 cat <<EOF > /etc/sudoers.d/vpn-api
-www-data ALL=(ALL) NOPASSWD: /usr/bin/api-vpn, /usr/sbin/useradd, /usr/sbin/chpasswd, /usr/bin/chage, /usr/sbin/userdel, /usr/bin/killall, /bin/systemctl, /usr/bin/jq, /bin/sed
+www-data ALL=(ALL) NOPASSWD: /usr/bin/api-vpn, /usr/bin/rebuild-hysteria, /usr/sbin/useradd, /usr/sbin/chpasswd, /usr/bin/chage, /usr/sbin/userdel, /usr/bin/killall, /bin/systemctl, /usr/bin/jq, /bin/sed
 EOF
 chmod 440 /etc/sudoers.d/vpn-api
 
@@ -173,80 +377,11 @@ server {
 EOF
 
 iptables -C INPUT -p tcp --dport 8081 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 8081 -j ACCEPT
-
-# 7. ติดตั้ง ZIVPN UDP Tunnel (พอร์ต 5667 และ 6000-19999)
-if [ ! -s /usr/local/bin/zivpn-udp ]; then
-    echo "กำลังติดตั้ง ZIVPN UDP Server..."
-    ARCH=$(uname -m)
-    if [[ "$ARCH" == "x86_64" ]]; then
-        wget -q -O /usr/local/bin/zivpn-udp "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64"
-    elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
-        wget -q -O /usr/local/bin/zivpn-udp "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-arm64"
-    fi
-    chmod +x /usr/local/bin/zivpn-udp
-fi
-
-if [ ! -s /etc/zivpn/zivpn.crt ]; then
-    openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
-        -subj "/C=TH/ST=Bangkok/L=Bangkok/O=ZIVPN/CN=zivpn" \
-        -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt" >/dev/null 2>&1
-fi
-
-sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1
-sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1
-
-if [ ! -s /etc/zivpn/config.json ]; then
-cat <<EOF > /etc/zivpn/config.json
-{
-  "listen": ":5667",
-  "cert": "/etc/zivpn/zivpn.crt",
-  "key": "/etc/zivpn/zivpn.key",
-  "obfs": "zivpn",
-  "auth": {
-    "mode": "passwords",
-    "config": [
-      "zivpn-default"
-    ]
-  }
-}
-EOF
-fi
-
-cat <<EOF > /etc/systemd/system/zivpn.service
-[Unit]
-Description=ZIVPN UDP Tunnel Server
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/zivpn
-ExecStart=/usr/local/bin/zivpn-udp server -c /etc/zivpn/config.json
-Restart=always
-RestartSec=3
-Environment=ZIVPN_LOG_LEVEL=info
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-iptables -t nat -C PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || \
-iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
-iptables -C INPUT -p udp --dport 5667 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 5667 -j ACCEPT
-iptables -C INPUT -p udp --dport 6000:19999 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 6000:19999 -j ACCEPT
 netfilter-persistent save >/dev/null 2>&1
 netfilter-persistent reload >/dev/null 2>&1
-
-systemctl daemon-reload
-systemctl enable zivpn >/dev/null 2>&1
-systemctl restart zivpn
 systemctl restart nginx
 
-# 8. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
+# 11. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
     echo "กำลังติดตั้ง BadVPN UDPGW..."
     wget -q -O /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
@@ -291,7 +426,7 @@ for port in 7100 7200 7300; do
     systemctl restart udpgw@${port}
 done
 
-# 9. ตั้งค่า Dropbear ให้ทำงานที่พอร์ต 109 และ 143
+# 12. ตั้งค่า Dropbear ให้ทำงานที่พอร์ต 109 และ 143
 cat <<EOF > /etc/default/dropbear
 NO_START=0
 DROPBEAR_PORT=143
@@ -310,7 +445,7 @@ EOF
 systemctl enable dropbear >/dev/null 2>&1
 systemctl restart dropbear
 
-# 10. สร้างสคริปต์ลบบัญชีหมดอายุอัตโนมัติ (xp)
+# 13. สร้างสคริปต์ลบบัญชีหมดอายุอัตโนมัติ (xp)
 cat << 'EOF' > /usr/bin/xp
 #!/bin/bash
 export LC_ALL=en_US.UTF-8
@@ -358,11 +493,25 @@ if [ -f /etc/zivpn/zivpn-exp.txt ]; then
         fi
     done < /etc/zivpn/zivpn-exp.txt
 fi
+
+if [ -f /etc/hysteria/hys-users.txt ]; then
+    hys_changed=0
+    while IFS=':' read -r h_user h_pass h_exp; do
+        if [[ -n "$h_exp" ]]; then
+            exp_sec=$(date -d "$h_exp" +%s 2>/dev/null || echo 9999999999)
+            if [[ $today_sec -ge $exp_sec ]]; then
+                sed -i "/^$h_user:/d" /etc/hysteria/hys-users.txt
+                echo "Deleted Expired Hysteria2 Account: $h_user"
+                hys_changed=1
+            fi
+        fi
+    done < /etc/hysteria/hys-users.txt
+    [[ $hys_changed -eq 1 ]] && /usr/bin/rebuild-hysteria
+fi
 EOF
 chmod +x /usr/bin/xp
 
-# 11. สร้างสคริปต์เตะคนล็อกอินซ้อนเกินกำหนด (tendang) และสคริปต์ล้างขยะ (clear-log)
-mkdir -p /etc/xray
+# 14. สร้างสคริปต์เตะคนล็อกอินซ้อนเกินกำหนด (tendang) และสคริปต์ล้างขยะ (clear-log)
 [ ! -f /etc/xray/limit-ssh ] && echo "2" > /etc/xray/limit-ssh
 [ ! -f /etc/xray/autoreboot-status ] && echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)" > /etc/xray/autoreboot-status
 
@@ -413,7 +562,7 @@ EOF
 fi
 systemctl restart cron
 
-# 12. สร้างคำสั่งเช็กสถานะ 'running'
+# 15. สร้างคำสั่งเช็กสถานะ 'running'
 cat << 'EOF' > /usr/bin/running
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -455,6 +604,7 @@ echo -e " Nginx Proxy (80 / 443)   : $(check_status nginx)"
 echo -e " Web API Panel (8081)     : ${API_STAT}"
 echo -e " Xray Core (Vmess/Vless)  : $(check_status xray)"
 echo -e " ZIVPN UDP (5667/6000+)   : $(check_status zivpn)"
+echo -e " Hysteria 2 (8443/20000+) : $(check_status hysteria)"
 echo -e " SSH WebSocket (10015)    : $(check_status ws-epro)"
 echo -e " BadVPN UDPGW (7300)      : $(check_status udpgw@7300)"
 echo -e " Fail2Ban (Anti-Brute)    : $(check_status fail2ban)"
@@ -465,7 +615,7 @@ echo -e "${YELLOW}=========================================${NC}"
 EOF
 chmod +x /usr/bin/running
 
-# 13. สร้างคำสั่งหน้าหลัก 'menu'
+# 16. สร้างคำสั่งหน้าหลัก 'menu'
 cat << 'EOF' > /usr/bin/menu
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -479,8 +629,8 @@ DOMAIN=$(cat /etc/xray/domain 2>/dev/null || echo "$MYIP")
 MAX_LOGIN=$(cat /etc/xray/limit-ssh 2>/dev/null || echo "2")
 REBOOT_STAT=$(cat /etc/xray/autoreboot-status 2>/dev/null || echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)")
 RAM_USAGE=$(free -m | awk 'NR==2{printf "%s/%s MB (%.1f%%)", $3,$2,$3*100/$2 }')
-mkdir -p /etc/xray /etc/zivpn
-touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt
+mkdir -p /etc/xray /etc/zivpn /etc/hysteria
+touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
 clear
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
@@ -491,11 +641,11 @@ echo -e " Domain      : ${GREEN}${DOMAIN}${NC}"
 echo -e " RAM Usage   : ${GREEN}${RAM_USAGE}${NC}"
 echo -e " Multi-Login : ${GREEN}สูงสุด ${MAX_LOGIN} เครื่อง/บัญชี${NC}"
 echo -e " Auto-Reboot : ${GREEN}${REBOOT_STAT}${NC}"
-echo -e "${YELLOW}☉——————————— [ จัดการบัญชี SSH / WS ] ———————————☉${NC}"
-echo -e " [1]  สร้างบัญชี SSH / WebSocket (+ZIVPN UDP)"
-echo -e " [2]  ต่ออายุบัญชี SSH (Renew)"
+echo -e "${YELLOW}☉—————— [ จัดการบัญชี SSH / ZIVPN / HYS2 ] ——————☉${NC}"
+echo -e " [1]  สร้างบัญชี All-in-One (SSH + ZIVPN + Hysteria2)"
+echo -e " [2]  ต่ออายุบัญชี All-in-One (Renew)"
 echo -e " [3]  ระงับ / ปลดล็อกบัญชี SSH (Lock/Unlock)"
-echo -e " [4]  ลบบัญชี SSH / WebSocket"
+echo -e " [4]  ลบบัญชี All-in-One (Delete)"
 echo -e " [5]  ดูรายชื่อบัญชี SSH ทั้งหมด"
 echo -e "${YELLOW}☉——————————— [ จัดการบัญชี XRAY CORE ] ——————————☉${NC}"
 echo -e " [6]  สร้างบัญชี Xray (Vmess & Vless)"
@@ -508,20 +658,25 @@ echo -e " [11] สร้างรหัสผ่าน ZIVPN UDP แยกเฉ
 echo -e " [12] ต่ออายุรหัสผ่าน ZIVPN UDP (Renew)"
 echo -e " [13] ลบรหัสผ่าน ZIVPN UDP (Delete)"
 echo -e " [14] ดูรหัสผ่าน ZIVPN UDP ทั้งหมด"
+echo -e "${YELLOW}☉——————————— [ จัดการบัญชี HYSTERIA 2 ] —————————☉${NC}"
+echo -e " [15] สร้างบัญชี Hysteria 2 แยกเฉพาะ"
+echo -e " [16] ต่ออายุบัญชี Hysteria 2 (Renew)"
+echo -e " [17] ลบบัญชี Hysteria 2 (Delete)"
+echo -e " [18] ดูรายชื่อบัญชี Hysteria 2 และขอดูลิงก์เชื่อมต่อ"
 echo -e "${YELLOW}☉——————————— [ ระบบความปลอดภัยและบำรุงรักษา ] —————☉${NC}"
-echo -e " [15] เช็กผู้ใช้ออนไลน์ (SSH / Dropbear / Xray)"
-echo -e " [16] ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
-echo -e " [17] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
-echo -e " [18] เช็กสถานะบริการและไฟร์วอลล์ (running)"
-echo -e " [19] รีสตาร์ทบริการทั้งหมด"
-echo -e " [20] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะบัญชี)"
-echo -e " [21] ล้างไฟล์ขยะ Log และเคลียร์ RAM ทันที"
-echo -e " [22] ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ"
-echo -e " [23] อัปเดตสคริปต์และเมนูเวอร์ชันล่าสุดจาก GitHub"
-echo -e " [24] ดูข้อมูลเชื่อมต่อ API สำหรับเว็บขาย VPN (Port 8081)"
+echo -e " [19] เช็กผู้ใช้ออนไลน์ (SSH / Dropbear / Xray)"
+echo -e " [20] ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
+echo -e " [21] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
+echo -e " [22] เช็กสถานะบริการและไฟร์วอลล์ (running)"
+echo -e " [23] รีสตาร์ทบริการทั้งหมด"
+echo -e " [24] ลบบัญชีที่หมดอายุทันที (เคลียร์ขยะบัญชี)"
+echo -e " [25] ล้างไฟล์ขยะ Log และเคลียร์ RAM ทันที"
+echo -e " [26] ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ"
+echo -e " [27] อัปเดตสคริปต์และเมนูเวอร์ชันล่าสุดจาก GitHub"
+echo -e " [28] ดูข้อมูลเชื่อมต่อ API สำหรับเว็บขาย VPN (Port 8081)"
 echo -e " [0]  ออกจากเมนู"
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-24]: " opt
+read -rp "เลือกเมนู [0-28]: " opt
 
 case $opt in
     1)
@@ -534,24 +689,28 @@ case $opt in
         read -rp "จำนวนวันที่ใช้งาน (เช่น 30): " days
         exp=$(date -d "$days days" +"%Y-%m-%d")
         /usr/bin/api-vpn add "$user" "$pass" "$exp"
+        pass_enc=$(echo -n "$pass" | jq -sRr @uri)
+        HYS_LINK="hysteria2://${pass_enc}@${DOMAIN}:8443/?insecure=1&sni=${DOMAIN}#${user}-Hysteria2"
+        HYS_HOP="hysteria2://${pass_enc}@${DOMAIN}:20000/?insecure=1&sni=${DOMAIN}&mport=20000-50000#${user}-Hys2-Hopping"
         clear
-        echo -e "${YELLOW}=== ข้อมูลบัญชี SSH, WebSocket & ZIVPN UDP ===${NC}"
+        echo -e "${YELLOW}=== ข้อมูลบัญชี SSH, WebSocket, ZIVPN & Hysteria 2 ===${NC}"
         echo -e "Host/IP      : $DOMAIN ($MYIP)"
         echo -e "Username     : $user"
-        echo -e "Password     : $pass (ใช้เป็น UDP Password ใน ZIVPN ได้ทันที)"
-        echo -e "OpenSSH      : 22"
-        echo -e "Dropbear     : 109, 143"
-        echo -e "WS Port      : 80"
-        echo -e "WS SSL/TLS   : 443"
-        echo -e "ZIVPN UDP    : 5667, 6000-19999"
+        echo -e "Password     : $pass"
+        echo -e "OpenSSH      : 22 | Dropbear : 109, 143"
+        echo -e "WS Port      : 80 | WS TLS   : 443"
+        echo -e "ZIVPN UDP    : 5667, 6000-19999 (ใช้รหัส $pass)"
+        echo -e "Hysteria 2   : 8443, 20000-50000 (ใช้รหัส $pass)"
         echo -e "UDPGW Port   : 7100, 7200, 7300"
-        echo -e "จำกัดล็อกอิน   : ไม่เกิน ${MAX_LOGIN} เครื่อง"
-        echo -e "Payload      : GET / HTTP/1.1[crlf]Host: ${DOMAIN}[crlf]Upgrade: websocket[crlf][crlf]"
+        echo -e "Payload WS   : GET / HTTP/1.1[crlf]Host: ${DOMAIN}[crlf]Upgrade: websocket[crlf][crlf]"
         echo -e "หมดอายุวันที่   : ${exp}"
-        echo -e "${YELLOW}============================================${NC}"
+        echo -e "${YELLOW}----------------------------------------------------${NC}"
+        echo -e "${CYAN}[ลิงก์เชื่อมต่อ Hysteria 2 แบบ Port Hopping (20000-50000)]${NC}"
+        echo -e "${HYS_HOP}"
+        echo -e "${YELLOW}====================================================${NC}"
         ;;
     2)
-        read -rp "พิมพ์ชื่อบัญชี SSH ที่ต้องการต่ออายุ: " user
+        read -rp "พิมพ์ชื่อบัญชีที่ต้องการต่ออายุ: " user
         if ! id "$user" &>/dev/null; then
             echo -e "${RED}ไม่พบชื่อบัญชี ${user} ในระบบ!${NC}"
             exit 1
@@ -567,7 +726,7 @@ case $opt in
         fi
         new_exp=$(date -d "$base_date + $days days" +%Y-%m-%d)
         /usr/bin/api-vpn renew "$user" "" "$new_exp"
-        echo -e "${GREEN}ต่ออายุบัญชี ${user} (รวมถึงรหัส ZIVPN UDP) สำเร็จ! วันหมดอายุใหม่คือ: ${new_exp}${NC}"
+        echo -e "${GREEN}ต่ออายุบัญชี ${user} (SSH + ZIVPN + Hysteria 2) สำเร็จ! หมดอายุ: ${new_exp}${NC}"
         ;;
     3)
         echo -e " [1] ระงับบัญชีชั่วคราว (Lock)"
@@ -588,10 +747,10 @@ case $opt in
         fi
         ;;
     4)
-        read -rp "พิมพ์ชื่อบัญชี SSH ที่ต้องการลบ: " delssh
+        read -rp "พิมพ์ชื่อบัญชีที่ต้องการลบ: " delssh
         if id "$delssh" &>/dev/null; then
             /usr/bin/api-vpn delete "$delssh" "" ""
-            echo -e "${GREEN}ลบบัญชี SSH และรหัส ZIVPN ของ ${delssh} เรียบร้อยแล้ว!${NC}"
+            echo -e "${GREEN}ลบบัญชี ${delssh} ออกจากทั้ง SSH, ZIVPN และ Hysteria 2 เรียบร้อยแล้ว!${NC}"
         else
             echo -e "${RED}ไม่พบชื่อบัญชี ${delssh} ในระบบ!${NC}"
         fi
@@ -653,14 +812,10 @@ JSON
         echo -e "UUID          : ${GREEN}${UUID}${NC}"
         echo -e "หมดอายุวันที่     : ${GREEN}${exp} (${days} วัน)${NC}"
         echo -e "${YELLOW}-------------------------------------------${NC}"
-        echo -e "${CYAN}[ลิงก์ Vmess SSL/TLS (Port 443)]${NC}"
-        echo -e "vmess://${VMESS_TLS}\n"
-        echo -e "${CYAN}[ลิงก์ Vmess HTTP (Port 80)]${NC}"
-        echo -e "vmess://${VMESS_NTLS}\n"
-        echo -e "${CYAN}[ลิงก์ Vless SSL/TLS (Port 443)]${NC}"
-        echo -e "${VLESS_TLS}\n"
-        echo -e "${CYAN}[ลิงก์ Vless HTTP (Port 80)]${NC}"
-        echo -e "${VLESS_NTLS}\n"
+        echo -e "${CYAN}[ลิงก์ Vmess SSL/TLS (Port 443)]${NC}\nvmess://${VMESS_TLS}\n"
+        echo -e "${CYAN}[ลิงก์ Vmess HTTP (Port 80)]${NC}\nvmess://${VMESS_NTLS}\n"
+        echo -e "${CYAN}[ลิงก์ Vless SSL/TLS (Port 443)]${NC}\n${VLESS_TLS}\n"
+        echo -e "${CYAN}[ลิงก์ Vless HTTP (Port 80)]${NC}\n${VLESS_NTLS}\n"
         echo -e "${YELLOW}===========================================${NC}"
         ;;
     7)
@@ -855,6 +1010,99 @@ JSON
         echo -e "${YELLOW}============================================================${NC}"
         ;;
     15)
+        read -rp "ตั้งชื่อผู้ใช้สำหรับบันทึกในระบบ (Username): " huser
+        if grep -q "^${huser}:" /etc/hysteria/hys-users.txt; then
+            echo -e "${RED}มีชื่อผู้ใช้นี้ในระบบ Hysteria 2 แล้ว!${NC}"
+            exit 1
+        fi
+        read -rp "ตั้งรหัสผ่าน (Password) [กด Enter เพื่อสุ่ม 8 หลัก]: " hpass
+        [[ -z "$hpass" ]] && hpass=$(openssl rand -hex 4)
+        read -rp "จำนวนวันที่ใช้งาน (เช่น 30): " days
+        exp=$(date -d "$days days" +"%Y-%m-%d")
+
+        echo "${huser}:${hpass}:${exp}" >> /etc/hysteria/hys-users.txt
+        /usr/bin/rebuild-hysteria
+
+        pass_enc=$(echo -n "$hpass" | jq -sRr @uri)
+        HYS_LINK="hysteria2://${pass_enc}@${DOMAIN}:8443/?insecure=1&sni=${DOMAIN}#${huser}-Hysteria2"
+        HYS_HOP="hysteria2://${pass_enc}@${DOMAIN}:20000/?insecure=1&sni=${DOMAIN}&mport=20000-50000#${huser}-Hys2-Hopping"
+        clear
+        echo -e "${YELLOW}====== ข้อมูลการเชื่อมต่อ Hysteria 2 (UDP QUIC) ======${NC}"
+        echo -e "Host / Domain  : ${GREEN}${DOMAIN}${NC} (${MYIP})"
+        echo -e "ชื่อกำกับบัญชี      : ${GREEN}${huser}${NC}"
+        echo -e "Password       : ${GREEN}${hpass}${NC}"
+        echo -e "Main UDP Port  : 20000 (หรือ 8443)"
+        echo -e "Port Hopping   : 20000-50000 (UDP)"
+        echo -e "หมดอายุวันที่     : ${GREEN}${exp} (${days} วัน)${NC}"
+        echo -e "${YELLOW}----------------------------------------------------${NC}"
+        echo -e "${CYAN}[ลิงก์ Hysteria 2 แบบ Port Hopping (20000-50000)]${NC}"
+        echo -e "${HYS_HOP}\n"
+        echo -e "${CYAN}[ลิงก์ Hysteria 2 แบบพอร์ตเดียว (Port 8443)]${NC}"
+        echo -e "${HYS_LINK}"
+        echo -e "${YELLOW}====================================================${NC}"
+        ;;
+    16)
+        read -rp "พิมพ์ชื่อบัญชี Hysteria 2 ที่ต้องการต่ออายุ: " huser
+        line=$(grep "^${huser}:" /etc/hysteria/hys-users.txt)
+        if [[ -z "$line" ]]; then
+            echo -e "${RED}ไม่พบบัญชี ${huser} ในระบบ Hysteria 2!${NC}"
+            exit 1
+        fi
+        hpass=$(echo "$line" | cut -d: -f2)
+        old_exp=$(echo "$line" | cut -d: -f3)
+        read -rp "จำนวนวันที่ต้องการเพิ่ม (เช่น 30): " days
+        today_sec=$(date +%s)
+        exp_sec=$(date -d "$old_exp" +%s 2>/dev/null || echo "$today_sec")
+        if [[ $exp_sec -lt $today_sec ]]; then
+            base_date=$(date +%Y-%m-%d)
+        else
+            base_date=$(date -d "$old_exp" +%Y-%m-%d)
+        fi
+        new_exp=$(date -d "$base_date + $days days" +%Y-%m-%d)
+        sed -i "/^${huser}:/d" /etc/hysteria/hys-users.txt
+        echo "${huser}:${hpass}:${new_exp}" >> /etc/hysteria/hys-users.txt
+        /usr/bin/rebuild-hysteria
+        echo -e "${GREEN}ต่ออายุบัญชี Hysteria 2: ${huser} สำเร็จ! วันหมดอายุใหม่คือ: ${new_exp}${NC}"
+        ;;
+    17)
+        read -rp "พิมพ์ชื่อบัญชี Hysteria 2 ที่ต้องการลบ: " delhys
+        if grep -q "^${delhys}:" /etc/hysteria/hys-users.txt; then
+            sed -i "/^${delhys}:/d" /etc/hysteria/hys-users.txt
+            /usr/bin/rebuild-hysteria
+            echo -e "${GREEN}ลบบัญชี Hysteria 2: ${delhys} เรียบร้อยแล้ว!${NC}"
+        else
+            echo -e "${RED}ไม่พบบัญชี ${delhys} ในระบบ!${NC}"
+        fi
+        ;;
+    18)
+        clear
+        echo -e "${YELLOW}========= รายชื่อบัญชี Hysteria 2 ทั้งหมด =========${NC}"
+        printf "%-18s %-18s %-15s %s\n" "Username" "Password" "Expire Date" "Status"
+        echo -e "------------------------------------------------------------"
+        if [ -s /etc/hysteria/hys-users.txt ]; then
+            while IFS=':' read -r hu hp hexp; do
+                printf "%-18s %-18s %-15s %b\n" "$hu" "$hp" "$hexp" "${GREEN}Active${NC}"
+            done < /etc/hysteria/hys-users.txt
+        else
+            echo "ยังไม่มีการสร้างบัญชี Hysteria 2 ในระบบ"
+        fi
+        echo -e "${YELLOW}============================================================${NC}"
+        read -rp "ต้องการดูลิงก์เชื่อมต่อของบัญชีใดไหมครับ? (พิมพ์ชื่อผู้ใช้ หรือกด Enter เพื่อข้าม): " showhys
+        if [[ -n "$showhys" ]]; then
+            hline=$(grep "^${showhys}:" /etc/hysteria/hys-users.txt)
+            if [[ -n "$hline" ]]; then
+                hp=$(echo "$hline" | cut -d: -f2)
+                hp_enc=$(echo -n "$hp" | jq -sRr @uri)
+                echo -e "\n${CYAN}[ลิงก์ Hysteria 2 แบบ Port Hopping (20000-50000)]${NC}"
+                echo -e "hysteria2://${hp_enc}@${DOMAIN}:20000/?insecure=1&sni=${DOMAIN}&mport=20000-50000#${showhys}-Hys2-Hopping\n"
+                echo -e "${CYAN}[ลิงก์ Hysteria 2 แบบพอร์ตเดียว (Port 8443)]${NC}"
+                echo -e "hysteria2://${hp_enc}@${DOMAIN}:8443/?insecure=1&sni=${DOMAIN}#${showhys}-Hysteria2\n"
+            else
+                echo -e "${RED}ไม่พบบัญชี ${showhys}${NC}"
+            fi
+        fi
+        ;;
+    19)
         clear
         echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (OpenSSH & SSH-WS) ===${NC}"
         printf "%-18s %-15s %s\n" "Username" "จำนวนที่เชื่อมต่อ" "PID"
@@ -905,12 +1153,12 @@ JSON
         tail -n 10 /var/log/autokill.log 2>/dev/null || echo "ยังไม่มีประวัติการทำผิดกฎ"
         echo -e "${YELLOW}===================================================${NC}"
         ;;
-    16)
+    20)
         read -rp "กำหนดจำนวนเครื่องสูงสุดต่อ 1 บัญชี (เช่น 2, ใส่ 0 เพื่อปิด): " max_num
         echo "$max_num" > /etc/xray/limit-ssh
         echo -e "${GREEN}บันทึกการจำกัดล็อกอินไว้ที่ ${max_num} เครื่อง เรียบร้อยแล้ว!${NC}"
         ;;
-    17)
+    21)
         read -rp "กรอกโดเมนใหม่ของคุณ (ชี้ IP มายังเซิร์ฟเวอร์นี้แล้ว): " newdom
         if [[ -z "$newdom" ]]; then
             echo -e "${RED}ยกเลิกการทำรายการ${NC}"
@@ -925,29 +1173,29 @@ JSON
             --fullchainpath /etc/xray/xray.crt \
             --keypath /etc/xray/xray.key --ecc
         systemctl start nginx
-        systemctl restart xray
-        echo -e "${GREEN}อัปเดตโดเมนและติดตั้ง SSL พอร์ต 443 เรียบร้อยแล้ว!${NC}"
+        systemctl restart xray hysteria
+        echo -e "${GREEN}อัปเดตโดเมนและติดตั้ง SSL สำหรับ Xray และ Hysteria 2 เรียบร้อยแล้ว!${NC}"
         ;;
-    18)
+    22)
         running
         ;;
-    19)
-        systemctl restart ssh dropbear nginx php*-fpm xray zivpn ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
+    23)
+        systemctl restart ssh dropbear nginx php*-fpm xray zivpn hysteria ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
-    20)
+    24)
         echo -e "${CYAN}กำลังสแกนหาและลบบัญชีที่หมดอายุ...${NC}"
         /usr/bin/xp
         echo -e "${GREEN}เคลียร์บัญชีหมดอายุเสร็จสิ้น!${NC}"
         ;;
-    21)
+    25)
         echo -e "${CYAN}กำลังล้างไฟล์ Log และเคลียร์ RAM Cache...${NC}"
         BEFORE_RAM=$(free -m | awk 'NR==2{print $3}')
         /usr/bin/clear-log
         AFTER_RAM=$(free -m | awk 'NR==2{print $3}')
         echo -e "${GREEN}ล้างไฟล์ขยะและเคลียร์ RAM สำเร็จ! (RAM ที่ใช้งานลดลงจาก ${BEFORE_RAM} MB เหลือ ${AFTER_RAM} MB)${NC}"
         ;;
-    22)
+    26)
         echo -e "${YELLOW}=== ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ ===${NC}"
         echo -e " [1] รีบูตทุกวัน เวลา 03:00 น. (แนะนำ)"
         echo -e " [2] รีบูตทุกวัน เวลา 05:00 น."
@@ -981,7 +1229,7 @@ JSON
         esac
         systemctl restart cron
         ;;
-    23)
+    27)
         echo -e "${CYAN}กำลังดึงไฟล์อัปเดตล่าสุดจาก GitHub (jannarong01/toeyvpn)...${NC}"
         wget -q -O /root/update-vpn.sh "https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh"
         if [ -s /root/update-vpn.sh ]; then
@@ -995,14 +1243,14 @@ JSON
             echo -e "${RED}ไม่สามารถดาวน์โหลดไฟล์จาก GitHub ได้ กรุณาตรวจสอบลิงก์หรือการเชื่อมต่ออินเทอร์เน็ต${NC}"
         fi
         ;;
-    24)
+    28)
         CUR_KEY=$(grep '$secret_key =' /home/vps/public_html/api_ssh.php | cut -d'"' -f2)
         clear
         echo -e "${YELLOW}====== ข้อมูลสำหรับตั้งค่าในหน้าเว็บ Admin (toeyvpn.com) ======${NC}"
         echo -e "URL API        : ${GREEN}http://${MYIP}:8081/api_ssh.php${NC}"
         echo -e "Secret Key     : ${GREEN}${CUR_KEY}${NC}"
         echo -e "Path ไฟล์ระบบ   : /home/vps/public_html/api_ssh.php"
-        echo -e "การทำงานอัตโนมัติ : สร้าง/ต่ออายุ/ลบ ทั้ง SSH และ ZIVPN UDP พร้อมกัน"
+        echo -e "การทำงานอัตโนมัติ : สร้าง/ต่ออายุ/ลบ ทั้ง SSH, ZIVPN UDP และ Hysteria 2 พร้อมกัน"
         echo -e "${YELLOW}===========================================================${NC}"
         read -rp "ต้องการเปลี่ยนรหัส Secret Key ใหม่หรือไม่? (พิมพ์รหัสใหม่ หรือกด Enter เพื่อใช้ค่าเดิม): " new_key
         if [[ -n "$new_key" ]]; then
@@ -1021,4 +1269,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "SSH, VPN, ZIVPN UDP, Web API (8081), Security & Maintenance Suite Installed Successfully!"
+echo "All-in-One VPN Suite (SSH, ZIVPN, Hysteria 2, Web API & Security) Installed Successfully!"
