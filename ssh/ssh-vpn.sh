@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-#  ALL-IN-ONE VPN SUITE: SSH, ZIVPN UDP, HYSTERIA 2, WEB API (8081) & SECURITY
+#  ALL-IN-ONE VPN SUITE: SSH, ZIVPN, HYSTERIA 2, WEB API, SECURITY & BACKUP
 # ==============================================================================
 export DEBIAN_FRONTEND=noninteractive
 
@@ -13,11 +13,11 @@ apt-get autoremove -y >/dev/null 2>&1
 # 2. ตั้งค่า Timezone เป็นเวลาไทย
 ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
 
-# 3. ติดตั้งแพ็กเกจหลัก + PHP-FPM + Fail2Ban + Iptables-Persistent
+# 3. ติดตั้งแพ็กเกจหลัก + PHP-FPM + Fail2Ban + Iptables-Persistent + Zip/Unzip
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix php-fpm php-cli php-curl
+apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix php-fpm php-cli php-curl zip unzip
 
 # 4. ตั้งค่าระบบป้องกันการสุ่มรหัสผ่าน (Fail2Ban)
 cat <<EOF > /etc/fail2ban/jail.local
@@ -46,7 +46,7 @@ for keyword in "get_peers" "announce_peer" "find_node" "BitTorrent" "BitTorrent 
     iptables -C OUTPUT -m string --string "$keyword" --algo bm -j DROP 2>/dev/null || iptables -A OUTPUT -m string --string "$keyword" --algo bm -j DROP
 done
 
-# 6. เตรียมโฟลเดอร์หลักและใบรับรอง SSL เบื้องต้น (กรณีรันก่อน ins-xray.sh)
+# 6. เตรียมโฟลเดอร์หลักและใบรับรอง SSL เบื้องต้น
 mkdir -p /etc/xray /etc/zivpn /etc/hysteria /home/vps/public_html /root/vnext_api
 touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
@@ -73,7 +73,6 @@ if [ ! -s /usr/local/bin/hysteria ]; then
     chmod +x /usr/local/bin/hysteria
 fi
 
-# สคริปต์ตรวจสอบรหัสผ่าน Hysteria 2 (รองรับทั้งแบบใส่เฉพาะ Password อย่างเดียว และ user:pass)
 cat << 'EOF' > /usr/bin/hys-auth
 #!/bin/bash
 ADDR="$1"
@@ -97,7 +96,6 @@ fi
 EOF
 chmod +x /usr/bin/hys-auth
 
-# สคริปต์สร้างไฟล์ตั้งค่า Hysteria 2
 cat << 'EOF' > /usr/bin/rebuild-hysteria
 #!/bin/bash
 mkdir -p /etc/hysteria
@@ -213,19 +211,17 @@ systemctl restart zivpn
 
 # 9. ตั้งค่า Iptables Port Forwarding สำหรับ ZIVPN UDP และ Hysteria 2
 NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-# กฎสำหรับ ZIVPN (6000-19999 -> 5667)
 iptables -t nat -C PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || \
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
 iptables -C INPUT -p udp --dport 5667 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 5667 -j ACCEPT
 iptables -C INPUT -p udp --dport 6000:19999 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 6000:19999 -j ACCEPT
 
-# กฎสำหรับ Hysteria 2 (20000-50000 -> 8443)
 iptables -t nat -C PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443 2>/dev/null || \
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443
 iptables -C INPUT -p udp --dport 8443 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 8443 -j ACCEPT
 iptables -C INPUT -p udp --dport 20000:50000 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 20000:50000 -j ACCEPT
 
-# 10. ติดตั้งระบบ Web API (Port 8081) เชื่อมต่อทั้ง SSH, ZIVPN UDP และ Hysteria 2 อัตโนมัติ
+# 10. ติดตั้งระบบ Web API (Port 8081) เชื่อมต่อทั้ง SSH, ZIVPN UDP และ Hysteria 2
 cat << 'EOF' > /usr/bin/api-vpn
 #!/bin/bash
 ACTION=$1
@@ -237,11 +233,9 @@ mkdir -p /etc/zivpn /etc/hysteria
 touch /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
 if [[ "$ACTION" == "add" ]]; then
-    # 1. สร้างบัญชี SSH / WebSocket
     /usr/sbin/useradd -e "$EXP" -s /bin/false -M "$USER" 2>/dev/null
     echo "$USER:$PASS" | /usr/sbin/chpasswd 2>/dev/null
 
-    # 2. เพิ่มรหัสผ่านเข้า ZIVPN UDP
     if [[ -n "$PASS" && -f /etc/zivpn/config.json ]]; then
         jq --arg p "$PASS" '.auth.config += [$p] | .auth.config |= unique' /etc/zivpn/config.json > /tmp/zivpn_tmp.json && mv /tmp/zivpn_tmp.json /etc/zivpn/config.json
         sed -i "/^${PASS}:/d" /etc/zivpn/zivpn-exp.txt
@@ -251,7 +245,6 @@ if [[ "$ACTION" == "add" ]]; then
         systemctl restart zivpn >/dev/null 2>&1
     fi
 
-    # 3. เพิ่มบัญชีเข้า Hysteria 2
     if [[ -n "$USER" && -n "$PASS" ]]; then
         sed -i "/^${USER}:/d" /etc/hysteria/hys-users.txt
         echo "${USER}:${PASS}:${EXP}" >> /etc/hysteria/hys-users.txt
@@ -259,10 +252,8 @@ if [[ "$ACTION" == "add" ]]; then
     fi
 
 elif [[ "$ACTION" == "renew" ]]; then
-    # 1. ต่ออายุ SSH
     /usr/bin/chage -E "$EXP" "$USER" 2>/dev/null
 
-    # 2. ต่ออายุ ZIVPN UDP
     ZPASS=$(grep "^${USER}:" /etc/zivpn/zivpn-users.txt | cut -d: -f2 | tail -n 1)
     [[ -z "$ZPASS" && -n "$PASS" ]] && ZPASS="$PASS"
     if [[ -n "$ZPASS" && -f /etc/zivpn/zivpn-exp.txt ]]; then
@@ -274,7 +265,6 @@ elif [[ "$ACTION" == "renew" ]]; then
         fi
     fi
 
-    # 3. ต่ออายุ Hysteria 2
     HPASS=$(grep "^${USER}:" /etc/hysteria/hys-users.txt | cut -d: -f2 | tail -n 1)
     [[ -z "$HPASS" && -n "$ZPASS" ]] && HPASS="$ZPASS"
     if [[ -n "$HPASS" ]]; then
@@ -284,11 +274,9 @@ elif [[ "$ACTION" == "renew" ]]; then
     fi
 
 elif [[ "$ACTION" == "delete" ]]; then
-    # 1. ลบ SSH
     /usr/bin/killall -u "$USER" 2>/dev/null
     /usr/sbin/userdel -f "$USER" 2>/dev/null
 
-    # 2. ลบ ZIVPN UDP
     ZPASS=$(grep "^${USER}:" /etc/zivpn/zivpn-users.txt | cut -d: -f2 | tail -n 1)
     sed -i "/^${USER}:/d" /etc/zivpn/zivpn-users.txt
     if [[ -n "$ZPASS" && -f /etc/zivpn/config.json ]]; then
@@ -299,7 +287,6 @@ elif [[ "$ACTION" == "delete" ]]; then
         fi
     fi
 
-    # 3. ลบ Hysteria 2
     if grep -q "^${USER}:" /etc/hysteria/hys-users.txt; then
         sed -i "/^${USER}:/d" /etc/hysteria/hys-users.txt
         /usr/bin/rebuild-hysteria
@@ -511,7 +498,7 @@ fi
 EOF
 chmod +x /usr/bin/xp
 
-# 14. สร้างสคริปต์เตะคนล็อกอินซ้อนเกินกำหนด (tendang) และสคริปต์ล้างขยะ (clear-log)
+# 14. สร้างสคริปต์เตะคนล็อกอินซ้อน (tendang), ล้างขยะ (clear-log), สำรองข้อมูล (backup-vpn / restore-vpn)
 [ ! -f /etc/xray/limit-ssh ] && echo "2" > /etc/xray/limit-ssh
 [ ! -f /etc/xray/autoreboot-status ] && echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)" > /etc/xray/autoreboot-status
 
@@ -549,6 +536,170 @@ journalctl --vacuum-size=50M >/dev/null 2>&1
 sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
 EOF
 chmod +x /usr/bin/clear-log
+
+cat << 'EOF' > /usr/bin/backup-vpn
+#!/bin/bash
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+MYIP=$(curl -sS ipv4.icanhazip.com)
+DATE=$(date +%Y-%m-%d_%H-%M)
+RAND_KEY=$(openssl rand -hex 4)
+BACKUP_DIR="/tmp/vpn_backup_data"
+ZIP_NAME="vpn-backup-${DATE}-${RAND_KEY}.zip"
+
+rm -rf "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR/xray" "$BACKUP_DIR/zivpn" "$BACKUP_DIR/hysteria" "$BACKUP_DIR/api"
+
+> "$BACKUP_DIR/ssh-users.txt"
+for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
+    hash=$(grep "^${user}:" /etc/shadow | cut -d: -f2)
+    exp_raw=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
+    if [[ "$exp_raw" == "never" || -z "$exp_raw" ]]; then
+        exp_ymd="never"
+    else
+        exp_ymd=$(date -d "$exp_raw" +%Y-%m-%d 2>/dev/null || echo "never")
+    fi
+    echo "${user}|${hash}|${exp_ymd}" >> "$BACKUP_DIR/ssh-users.txt"
+done
+
+cp -f /etc/xray/config.json "$BACKUP_DIR/xray/" 2>/dev/null
+cp -f /etc/xray/xray-exp.txt "$BACKUP_DIR/xray/" 2>/dev/null
+cp -f /etc/xray/xray-lock.txt "$BACKUP_DIR/xray/" 2>/dev/null
+cp -f /etc/xray/limit-ssh "$BACKUP_DIR/xray/" 2>/dev/null
+
+cp -f /etc/zivpn/config.json "$BACKUP_DIR/zivpn/" 2>/dev/null
+cp -f /etc/zivpn/zivpn-exp.txt "$BACKUP_DIR/zivpn/" 2>/dev/null
+cp -f /etc/zivpn/zivpn-users.txt "$BACKUP_DIR/zivpn/" 2>/dev/null
+
+cp -f /etc/hysteria/hys-users.txt "$BACKUP_DIR/hysteria/" 2>/dev/null
+cp -f /home/vps/public_html/api_ssh.php "$BACKUP_DIR/api/" 2>/dev/null
+
+cd "$BACKUP_DIR" || exit
+zip -r -q "/root/${ZIP_NAME}" ./*
+cd /root || exit
+rm -rf "$BACKUP_DIR"
+
+mkdir -p /home/vps/public_html
+rm -f /home/vps/public_html/vpn-backup-*.zip
+cp "/root/${ZIP_NAME}" "/home/vps/public_html/${ZIP_NAME}"
+chown www-data:www-data "/home/vps/public_html/${ZIP_NAME}"
+chmod 644 "/home/vps/public_html/${ZIP_NAME}"
+
+TELE_STAT="ไม่ได้ตั้งค่า"
+if [ -f /etc/xray/tele-bot.conf ]; then
+    source /etc/xray/tele-bot.conf
+    if [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]]; then
+        curl -s -F chat_id="$CHAT_ID" \
+             -F document=@"/root/${ZIP_NAME}" \
+             -F caption="📦 Backup ข้อมูล VPN เซิร์ฟเวอร์: ${MYIP} (${DATE})" \
+             "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" >/dev/null 2>&1
+        TELE_STAT="${GREEN}ส่งเข้า Telegram เรียบร้อยแล้ว${NC}"
+    fi
+fi
+
+if [[ "$1" != "silent" ]]; then
+    clear
+    echo -e "${YELLOW}================= สำรองข้อมูลสำเร็จ (BACKUP) =================${NC}"
+    echo -e "ไฟล์สำรองในเครื่อง : ${GREEN}/root/${ZIP_NAME}${NC}"
+    echo -e "ลิงก์สำหรับดึงย้ายเครื่อง : ${CYAN}http://${MYIP}:8081/${ZIP_NAME}${NC}"
+    echo -e "สถานะ Telegram : ${TELE_STAT}"
+    echo -e "${YELLOW}------------------------------------------------------------${NC}"
+    echo -e "วิธีใช้งาน: นำลิงก์ด้านบนไปวางในเมนู [30] ของเซิร์ฟเวอร์เครื่องใหม่ได้เลย"
+    echo -e "${YELLOW}============================================================${NC}"
+fi
+EOF
+chmod +x /usr/bin/backup-vpn
+
+cat << 'EOF' > /usr/bin/restore-vpn
+#!/bin/bash
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+clear
+echo -e "${YELLOW}============= กู้คืนข้อมูลบัญชีทั้งหมด (RESTORE) =============${NC}"
+echo -e "สามารถใส่ได้ทั้ง ลิงก์ตรง (http://...:8081/vpn-backup-xxx.zip)"
+echo -e "หรือ พาธไฟล์ในเครื่อง (เช่น /root/vpn-backup-xxx.zip)"
+echo -e "${YELLOW}------------------------------------------------------------${NC}"
+read -rp "กรอกลิงก์ หรือ พาธไฟล์ Backup (.zip): " src_input
+
+if [[ -z "$src_input" ]]; then
+    echo -e "${RED}ยกเลิกการทำรายการ${NC}"
+    exit 1
+fi
+
+RESTORE_ZIP="/tmp/restore_target.zip"
+RESTORE_DIR="/tmp/vpn_restore_data"
+rm -rf "$RESTORE_ZIP" "$RESTORE_DIR"
+
+if [[ "$src_input" == http* ]]; then
+    echo -e "${CYAN}กำลังดาวน์โหลดไฟล์สำรองข้อมูล...${NC}"
+    wget -q -O "$RESTORE_ZIP" "$src_input"
+else
+    if [ -f "$src_input" ]; then
+        cp "$src_input" "$RESTORE_ZIP"
+    fi
+fi
+
+if [ ! -s "$RESTORE_ZIP" ]; then
+    echo -e "${RED}ไม่พบไฟล์สำรองข้อมูล หรือดาวน์โหลดไม่สำเร็จ!${NC}"
+    exit 1
+fi
+
+mkdir -p "$RESTORE_DIR"
+unzip -q "$RESTORE_ZIP" -d "$RESTORE_DIR"
+
+if [ -f "$RESTORE_DIR/ssh-users.txt" ]; then
+    while IFS='|' read -r u hash exp; do
+        if [[ -n "$u" && -n "$hash" ]]; then
+            if ! id "$u" &>/dev/null; then
+                useradd -s /bin/false -M "$u" 2>/dev/null
+            fi
+            usermod -p "$hash" "$u" 2>/dev/null
+            if [[ "$exp" != "never" && -n "$exp" ]]; then
+                chage -E "$exp" "$u" 2>/dev/null
+            fi
+        fi
+    done < "$RESTORE_DIR/ssh-users.txt"
+fi
+
+mkdir -p /etc/xray
+[ -f "$RESTORE_DIR/xray/config.json" ] && cp -f "$RESTORE_DIR/xray/config.json" /etc/xray/config.json
+[ -f "$RESTORE_DIR/xray/xray-exp.txt" ] && cp -f "$RESTORE_DIR/xray/xray-exp.txt" /etc/xray/xray-exp.txt
+[ -f "$RESTORE_DIR/xray/xray-lock.txt" ] && cp -f "$RESTORE_DIR/xray/xray-lock.txt" /etc/xray/xray-lock.txt
+[ -f "$RESTORE_DIR/xray/limit-ssh" ] && cp -f "$RESTORE_DIR/xray/limit-ssh" /etc/xray/limit-ssh
+
+mkdir -p /etc/zivpn
+[ -f "$RESTORE_DIR/zivpn/config.json" ] && cp -f "$RESTORE_DIR/zivpn/config.json" /etc/zivpn/config.json
+[ -f "$RESTORE_DIR/zivpn/zivpn-exp.txt" ] && cp -f "$RESTORE_DIR/zivpn/zivpn-exp.txt" /etc/zivpn/zivpn-exp.txt
+[ -f "$RESTORE_DIR/zivpn/zivpn-users.txt" ] && cp -f "$RESTORE_DIR/zivpn/zivpn-users.txt" /etc/zivpn/zivpn-users.txt
+
+mkdir -p /etc/hysteria
+if [ -f "$RESTORE_DIR/hysteria/hys-users.txt" ]; then
+    cp -f "$RESTORE_DIR/hysteria/hys-users.txt" /etc/hysteria/hys-users.txt
+    /usr/bin/rebuild-hysteria
+fi
+
+if [ -f "$RESTORE_DIR/api/api_ssh.php" ]; then
+    mkdir -p /home/vps/public_html /root/vnext_api
+    cp -f "$RESTORE_DIR/api/api_ssh.php" /home/vps/public_html/api_ssh.php
+    cp -f "$RESTORE_DIR/api/api_ssh.php" /root/vnext_api/api_ssh.php
+    chown -R www-data:www-data /home/vps/public_html
+    chmod -R 755 /home/vps/public_html
+fi
+
+rm -rf "$RESTORE_ZIP" "$RESTORE_DIR"
+systemctl restart ssh dropbear xray zivpn hysteria nginx >/dev/null 2>&1
+
+echo -e "${GREEN}กู้คืนข้อมูลบัญชีทั้งหมด (SSH, Xray, ZIVPN, Hysteria 2 และ API) เรียบร้อยแล้ว!${NC}"
+EOF
+chmod +x /usr/bin/restore-vpn
 
 if [ ! -f /etc/cron.d/vpn-cron ]; then
 cat <<EOF > /etc/cron.d/vpn-cron
@@ -663,7 +814,7 @@ echo -e " [15] สร้างบัญชี Hysteria 2 แยกเฉพา�
 echo -e " [16] ต่ออายุบัญชี Hysteria 2 (Renew)"
 echo -e " [17] ลบบัญชี Hysteria 2 (Delete)"
 echo -e " [18] ดูรายชื่อบัญชี Hysteria 2 และขอดูลิงก์เชื่อมต่อ"
-echo -e "${YELLOW}☉——————————— [ ระบบความปลอดภัยและบำรุงรักษา ] —————☉${NC}"
+echo -e "${YELLOW}☉—————— [ ความปลอดภัย / บำรุงรักษา / สำรองข้อมูล ] —————☉${NC}"
 echo -e " [19] เช็กผู้ใช้ออนไลน์ (SSH / Dropbear / Xray)"
 echo -e " [20] ตั้งค่าจำกัดจำนวนเครื่องล็อกอิน (Auto-Kill)"
 echo -e " [21] เปลี่ยนโดเมนและขอ SSL ใหม่ (Port 443)"
@@ -674,9 +825,11 @@ echo -e " [25] ล้างไฟล์ขยะ Log และเคลียร
 echo -e " [26] ตั้งเวลา Auto-Reboot เซิร์ฟเวอร์อัตโนมัติ"
 echo -e " [27] อัปเดตสคริปต์และเมนูเวอร์ชันล่าสุดจาก GitHub"
 echo -e " [28] ดูข้อมูลเชื่อมต่อ API สำหรับเว็บขาย VPN (Port 8081)"
+echo -e " [29] สำรองข้อมูลบัญชีทั้งหมด (Backup & Telegram Bot)"
+echo -e " [30] กู้คืนข้อมูลบัญชีทั้งหมด (Restore ย้ายเซิร์ฟเวอร์)"
 echo -e " [0]  ออกจากเมนู"
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-28]: " opt
+read -rp "เลือกเมนู [0-30]: " opt
 
 case $opt in
     1)
@@ -1259,6 +1412,31 @@ JSON
             echo -e "${GREEN}เปลี่ยน Secret Key เป็น ${new_key} เรียบร้อยแล้ว!${NC}"
         fi
         ;;
+    29)
+        clear
+        echo -e "${YELLOW}====== ระบบสำรองข้อมูล (Backup & Telegram Bot) ======${NC}"
+        echo -e " [1] สำรองข้อมูลทันที (สร้างไฟล์ .zip และลิงก์ย้ายเครื่อง)"
+        echo -e " [2] ตั้งค่า Telegram Bot (ส่งไฟล์ Backup เข้าแชทอัตโนมัติทุกเที่ยงคืน)"
+        read -rp "เลือกทำรายการ [1-2]: " b_opt
+        if [[ "$b_opt" == "1" ]]; then
+            /usr/bin/backup-vpn
+        elif [[ "$b_opt" == "2" ]]; then
+            read -rp "กรอก Telegram Bot Token: " t_token
+            read -rp "กรอก Telegram Chat ID: " t_chat
+            cat <<CONF > /etc/xray/tele-bot.conf
+BOT_TOKEN="${t_token}"
+CHAT_ID="${t_chat}"
+CONF
+            sed -i '/\/usr\/bin\/backup-vpn/d' /etc/cron.d/vpn-cron
+            echo "5 0 * * * root /usr/bin/backup-vpn silent" >> /etc/cron.d/vpn-cron
+            systemctl restart cron
+            echo -e "${GREEN}บันทึกการตั้งค่า Telegram Bot และเปิดใช้งาน Auto-Backup ทุกวันเวลา 00:05 น. เรียบร้อยแล้ว!${NC}"
+            /usr/bin/backup-vpn
+        fi
+        ;;
+    30)
+        /usr/bin/restore-vpn
+        ;;
     0)
         exit 0
         ;;
@@ -1269,4 +1447,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "All-in-One VPN Suite (SSH, ZIVPN, Hysteria 2, Web API & Security) Installed Successfully!"
+echo "All-in-One VPN Suite (SSH, ZIVPN, Hysteria 2, Web API, Security & Backup) Installed Successfully!"
