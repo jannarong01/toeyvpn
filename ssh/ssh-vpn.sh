@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-#  ALL-IN-ONE VPN SUITE: SSH, ZIVPN, HYSTERIA 2, WEB API, SECURITY & BACKUP
+#  ALL-IN-ONE VPN SUITE: SSH/WS, UDP CUSTOM, BADVPN, ZIVPN, HYSTERIA 2, WEB API
 #  Support: Ubuntu 20.04 / 22.04 / 24.04 LTS & Debian 10 / 11 / 12
 # ==============================================================================
 export DEBIAN_FRONTEND=noninteractive
@@ -11,8 +11,10 @@ systemctl disable apache2 >/dev/null 2>&1
 apt-get purge -y ufw firewalld exim4 apache2 apache2-utils apache2-bin apache2-data >/dev/null 2>&1
 apt-get autoremove -y >/dev/null 2>&1
 
-# 2. ตั้งค่า Timezone เป็นเวลาไทย
+# 2. ตั้งค่า Timezone เป็นเวลาไทย และเปิด IPv4 Forwarding
 ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
+grep -qxF 'net.ipv4.ip_forward=1' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+sysctl -p >/dev/null 2>&1
 
 # 3. ติดตั้งแพ็กเกจหลัก + PHP-FPM + Fail2Ban + Iptables-Persistent + Zip/Unzip + Rsyslog
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
@@ -24,6 +26,21 @@ apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl 
 touch /var/log/auth.log /var/log/syslog
 systemctl enable rsyslog >/dev/null 2>&1
 systemctl restart rsyslog
+
+# ปลดล็อก OpenSSH 9.2+ บน Debian 12 / Ubuntu 24.04 ให้รองรับแอปมือถือ (ssh-rsa & PasswordAuth)
+mkdir -p /etc/ssh/sshd_config.d
+sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null
+cat <<EOF > /etc/ssh/sshd_config.d/99-vpn-compat.conf
+PasswordAuthentication yes
+PermitRootLogin yes
+PubkeyAcceptedKeyTypes +ssh-rsa,ssh-dss
+HostKeyAlgorithms +ssh-rsa,ssh-dss
+KexAlgorithms +diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
+EOF
+systemctl restart ssh
+
+# ลบหน้าเริ่มต้นของ Nginx (แก้ปัญหา HTTP 200 OK Welcome to nginx บน Debian 12)
+rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 
 # 4. ตั้งค่าระบบป้องกันการสุ่มรหัสผ่าน (Fail2Ban)
 cat <<EOF > /etc/fail2ban/jail.local
@@ -54,7 +71,7 @@ for keyword in "get_peers" "announce_peer" "find_node" "BitTorrent" "BitTorrent 
 done
 
 # 6. เตรียมโฟลเดอร์หลักและใบรับรอง SSL เบื้องต้น
-mkdir -p /etc/xray /etc/zivpn /etc/hysteria /home/vps/public_html /root/vnext_api
+mkdir -p /etc/xray /etc/zivpn /etc/hysteria /home/vps/public_html /root/vnext_api /root/udp
 touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
 MYIP=$(curl -sS ipv4.icanhazip.com)
@@ -216,19 +233,87 @@ systemctl daemon-reload
 systemctl enable zivpn >/dev/null 2>&1
 systemctl restart zivpn
 
-# 9. ตั้งค่า Iptables Port Forwarding สำหรับ ZIVPN UDP และ Hysteria 2
+# 9. ติดตั้ง UDP Custom (พอร์ตภายใน 7200 รับช่วงพอร์ต 1-65535)
+echo "กำลังติดตั้ง UDP Custom..."
+mkdir -p /root/udp
+if [ ! -f /usr/local/bin/udp-custom ] || [ $(stat -c%s "/usr/local/bin/udp-custom" 2>/dev/null || echo 0) -lt 1000000 ]; then
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "x86_64" ]]; then
+        URLS=(
+            "https://github.com/noobconner21/UDP-Custom-Script/raw/main/udp-custom-linux-amd64"
+            "https://github.com/rudi9999/Herramientas/raw/main/UDP/udp-custom-linux-amd64"
+            "https://raw.githubusercontent.com/zahidbd2/udp-custom/main/bin/udp-custom-linux-amd64"
+        )
+    else
+        URLS=(
+            "https://github.com/noobconner21/UDP-Custom-Script/raw/main/udp-custom-linux-arm"
+            "https://github.com/rudi9999/Herramientas/raw/main/UDP/udp-custom-linux-arm"
+        )
+    fi
+    for url in "${URLS[@]}"; do
+        wget -q --no-check-certificate -O /usr/local/bin/udp-custom "$url"
+        if [ -f /usr/local/bin/udp-custom ] && [ $(stat -c%s "/usr/local/bin/udp-custom") -gt 1000000 ]; then
+            break
+        fi
+    done
+fi
+chmod +x /usr/local/bin/udp-custom
+cp -f /usr/local/bin/udp-custom /root/udp/udp-custom
+chmod +x /root/udp/udp-custom
+
+cat <<EOF > /root/udp/config.json
+{
+  "listen": ":7200",
+  "stream_buffer": 33554432,
+  "receive_buffer": 83886080,
+  "auth": {
+    "mode": "passwords"
+  }
+}
+EOF
+chmod 644 /root/udp/config.json
+
+cat <<EOF > /etc/systemd/system/udp-custom.service
+[Unit]
+Description=UDP Custom VPN Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/udp
+ExecStart=/usr/local/bin/udp-custom server
+Restart=always
+RestartSec=3
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable udp-custom >/dev/null 2>&1
+systemctl restart udp-custom
+
+# 10. ตั้งค่า Iptables Port Forwarding แบบสะอาด (ไม่ให้กฎซ้อนทับกัน)
 NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-iptables -t nat -C PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || \
+iptables -t nat -F PREROUTING
+
+# กฎสำหรับ ZIVPN (5667) และ Hysteria 2 (8443)
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 5667 -j ACCEPT
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 8443 -j ACCEPT
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
-iptables -C INPUT -p udp --dport 5667 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 5667 -j ACCEPT
-iptables -C INPUT -p udp --dport 6000:19999 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 6000:19999 -j ACCEPT
-
-iptables -t nat -C PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443 2>/dev/null || \
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443
-iptables -C INPUT -p udp --dport 8443 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 8443 -j ACCEPT
-iptables -C INPUT -p udp --dport 20000:50000 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 20000:50000 -j ACCEPT
 
-# 10. ติดตั้งระบบ Web API (Port 8081) เชื่อมต่อทั้ง SSH, ZIVPN UDP และ Hysteria 2
+# กฎหลักโยนพอร์ต UDP 1-65535 เข้าพอร์ต 7200 ของ UDP Custom (แบบเดียวกับ th8)
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 1:65535 -j DNAT --to-destination :7200
+iptables -t nat -C POSTROUTING -o "$NET_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$NET_IFACE" -j MASQUERADE
+
+iptables -C INPUT -p udp --dport 7200 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 7200 -j ACCEPT
+iptables -C INPUT -p udp --dport 5667 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 5667 -j ACCEPT
+iptables -C INPUT -p udp --dport 8443 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 8443 -j ACCEPT
+
+# 11. ติดตั้งระบบ Web API (Port 8081) เชื่อมต่อทั้ง SSH, UDP Custom, ZIVPN UDP และ Hysteria 2
 cat << 'EOF' > /usr/bin/api-vpn
 #!/bin/bash
 ACTION=$1
@@ -375,7 +460,7 @@ netfilter-persistent save >/dev/null 2>&1
 netfilter-persistent reload >/dev/null 2>&1
 systemctl restart nginx
 
-# 11. ติดตั้ง BadVPN UDPGW (พอร์ต 7100, 7200, 7300)
+# 12. ติดตั้ง BadVPN UDPGW (พอร์ต 7100 และ 7300 เพื่อไม่ให้ชนกับ 7200 ของ UDP Custom)
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
     echo "กำลังติดตั้ง BadVPN UDPGW..."
     wget -q -O /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
@@ -383,17 +468,6 @@ fi
 
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
     wget -q -O /usr/local/bin/badvpn-udpgw "https://github.com/ambrop72/badvpn/raw/master/badvpn-udpgw64"
-fi
-
-if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
-    apt-get install -y cmake build-essential git libnspr4-dev libnss3-dev pkg-config
-    git clone https://github.com/ambrop72/badvpn.git /tmp/badvpn
-    mkdir -p /tmp/badvpn/build
-    cd /tmp/badvpn/build || exit
-    cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1
-    make install
-    cd /root || exit
-    rm -rf /tmp/badvpn
 fi
 
 chmod +x /usr/local/bin/badvpn-udpgw
@@ -414,13 +488,15 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+systemctl stop udpgw@7200 >/dev/null 2>&1
+systemctl disable udpgw@7200 >/dev/null 2>&1
 systemctl daemon-reload
-for port in 7100 7200 7300; do
+for port in 7100 7300; do
     systemctl enable udpgw@${port} >/dev/null 2>&1
     systemctl restart udpgw@${port}
 done
 
-# 12. ตั้งค่า Dropbear ให้ทำงานที่พอร์ต 109 และ 143
+# 13. ตั้งค่า Dropbear (พอร์ต 109 และ 143) และ SSH WebSocket (ws-epro พอร์ต 10015)
 cat <<EOF > /etc/default/dropbear
 NO_START=0
 DROPBEAR_PORT=143
@@ -439,7 +515,85 @@ EOF
 systemctl enable dropbear >/dev/null 2>&1
 systemctl restart dropbear
 
-# 13. สร้างสคริปต์ลบบัญชีหมดอายุอัตโนมัติ (xp)
+cat << 'EOF' > /usr/local/bin/ws-epro
+#!/usr/bin/env python3
+import socket, threading, select
+
+LISTEN_HOST = '127.0.0.1'
+LISTEN_PORT = 10015
+TARGET_HOST = '127.0.0.1'
+TARGET_PORT = 22
+
+def handle_client(client_sock):
+    target_sock = None
+    try:
+        client_sock.settimeout(10)
+        data = client_sock.recv(4096)
+        if not data:
+            return
+        client_sock.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        client_sock.settimeout(None)
+
+        target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        target_sock.connect((TARGET_HOST, TARGET_PORT))
+
+        sockets = [client_sock, target_sock]
+        while True:
+            r, _, _ = select.select(sockets, [], [], 120)
+            if not r:
+                break
+            for s in r:
+                buf = s.recv(16384)
+                if not buf:
+                    return
+                if s is client_sock:
+                    target_sock.sendall(buf)
+                else:
+                    client_sock.sendall(buf)
+    except Exception:
+        pass
+    finally:
+        try: client_sock.close()
+        except: pass
+        try:
+            if target_sock: target_sock.close()
+        except: pass
+
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((LISTEN_HOST, LISTEN_PORT))
+    server.listen(1024)
+    while True:
+        client_sock, _ = server.accept()
+        threading.Thread(target=handle_client, args=(client_sock,), daemon=True).start()
+
+if __name__ == '__main__':
+    main()
+EOF
+chmod +x /usr/local/bin/ws-epro
+
+cat <<EOF > /etc/systemd/system/ws-epro.service
+[Unit]
+Description=SSH WebSocket Proxy Service (Port 10015)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/bin/ws-epro
+Restart=always
+RestartSec=2
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable ws-epro >/dev/null 2>&1
+systemctl restart ws-epro
+
+# 14. สร้างสคริปต์ลบบัญชีหมดอายุอัตโนมัติ (xp)
 cat << 'EOF' > /usr/bin/xp
 #!/bin/bash
 export LC_ALL=en_US.UTF-8
@@ -505,7 +659,7 @@ fi
 EOF
 chmod +x /usr/bin/xp
 
-# 14. สร้างสคริปต์เตะคนล็อกอินซ้อน (tendang), ล้างขยะ (clear-log), สำรองข้อมูล (backup-vpn / restore-vpn)
+# 15. สร้างสคริปต์เตะคนล็อกอินซ้อน (tendang), ล้างขยะ (clear-log), สำรองข้อมูล (backup-vpn / restore-vpn)
 [ ! -f /etc/xray/limit-ssh ] && echo "2" > /etc/xray/limit-ssh
 [ ! -f /etc/xray/autoreboot-status ] && echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)" > /etc/xray/autoreboot-status
 
@@ -702,9 +856,9 @@ if [ -f "$RESTORE_DIR/api/api_ssh.php" ]; then
 fi
 
 rm -rf "$RESTORE_ZIP" "$RESTORE_DIR"
-systemctl restart ssh dropbear xray zivpn hysteria nginx >/dev/null 2>&1
+systemctl restart ssh dropbear xray zivpn hysteria udp-custom nginx >/dev/null 2>&1
 
-echo -e "${GREEN}กู้คืนข้อมูลบัญชีทั้งหมด (SSH, Xray, ZIVPN, Hysteria 2 และ API) เรียบร้อยแล้ว!${NC}"
+echo -e "${GREEN}กู้คืนข้อมูลบัญชีทั้งหมด (SSH, UDP Custom, Xray, ZIVPN, Hysteria 2 และ API) เรียบร้อยแล้ว!${NC}"
 EOF
 chmod +x /usr/bin/restore-vpn
 
@@ -720,7 +874,7 @@ EOF
 fi
 systemctl restart cron
 
-# 15. สร้างคำสั่งเช็กสถานะ 'running'
+# 16. สร้างคำสั่งเช็กสถานะ 'running'
 cat << 'EOF' > /usr/bin/running
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -761,10 +915,11 @@ echo -e " Dropbear Service         : $(check_status dropbear)"
 echo -e " Nginx Proxy (80 / 443)   : $(check_status nginx)"
 echo -e " Web API Panel (8081)     : ${API_STAT}"
 echo -e " Xray Core (Vmess/Vless)  : $(check_status xray)"
+echo -e " UDP Custom (1-65535/7200): $(check_status udp-custom)"
+echo -e " BadVPN UDPGW (Port 7300) : $(check_status udpgw@7300)"
 echo -e " ZIVPN UDP (5667/6000+)   : $(check_status zivpn)"
 echo -e " Hysteria 2 (8443/20000+) : $(check_status hysteria)"
 echo -e " SSH WebSocket (10015)    : $(check_status ws-epro)"
-echo -e " BadVPN UDPGW (7300)      : $(check_status udpgw@7300)"
 echo -e " Fail2Ban (Anti-Brute)    : $(check_status fail2ban)"
 echo -e " Anti-Torrent Firewall    : ${TORRENT_STAT}"
 echo -e " Cron (Auto-Kill / Exp)   : $(check_status cron)"
@@ -773,7 +928,7 @@ echo -e "${YELLOW}=========================================${NC}"
 EOF
 chmod +x /usr/bin/running
 
-# 16. สร้างคำสั่งหน้าหลัก 'menu'
+# 17. สร้างคำสั่งหน้าหลัก 'menu'
 cat << 'EOF' > /usr/bin/menu
 #!/bin/bash
 GREEN='\033[0;32m'
@@ -800,7 +955,7 @@ echo -e " RAM Usage   : ${GREEN}${RAM_USAGE}${NC}"
 echo -e " Multi-Login : ${GREEN}สูงสุด ${MAX_LOGIN} เครื่อง/บัญชี${NC}"
 echo -e " Auto-Reboot : ${GREEN}${REBOOT_STAT}${NC}"
 echo -e "${YELLOW}☉—————— [ จัดการบัญชี SSH / ZIVPN / HYS2 ] ——————☉${NC}"
-echo -e " [1]  สร้างบัญชี All-in-One (SSH + ZIVPN + Hysteria2)"
+echo -e " [1]  สร้างบัญชี All-in-One (SSH + UDP Custom + ZIVPN + Hys2)"
 echo -e " [2]  ต่ออายุบัญชี All-in-One (Renew)"
 echo -e " [3]  ระงับ / ปลดล็อกบัญชี SSH (Lock/Unlock)"
 echo -e " [4]  ลบบัญชี All-in-One (Delete)"
@@ -853,15 +1008,16 @@ case $opt in
         HYS_LINK="hysteria2://${pass_enc}@${DOMAIN}:8443/?insecure=1&sni=${DOMAIN}#${user}-Hysteria2"
         HYS_HOP="hysteria2://${pass_enc}@${DOMAIN}:20000/?insecure=1&sni=${DOMAIN}&mport=20000-50000#${user}-Hys2-Hopping"
         clear
-        echo -e "${YELLOW}=== ข้อมูลบัญชี SSH, WebSocket, ZIVPN & Hysteria 2 ===${NC}"
+        echo -e "${YELLOW}=== ข้อมูลบัญชี SSH, UDP Custom, ZIVPN & Hysteria 2 ===${NC}"
         echo -e "Host/IP      : $DOMAIN ($MYIP)"
         echo -e "Username     : $user"
         echo -e "Password     : $pass"
         echo -e "OpenSSH      : 22 | Dropbear : 109, 143"
         echo -e "WS Port      : 80 | WS TLS   : 443"
+        echo -e "UDP Custom   : 1-65535 (พอร์ตภายใน 7200)"
+        echo -e "BadVPN UDPGW : 7100, 7300"
         echo -e "ZIVPN UDP    : 5667, 6000-19999 (ใช้รหัส $pass)"
         echo -e "Hysteria 2   : 8443, 20000-50000 (ใช้รหัส $pass)"
-        echo -e "UDPGW Port   : 7100, 7200, 7300"
         echo -e "Payload WS   : GET / HTTP/1.1[crlf]Host: ${DOMAIN}[crlf]Upgrade: websocket[crlf][crlf]"
         echo -e "หมดอายุวันที่   : ${exp}"
         echo -e "${YELLOW}----------------------------------------------------${NC}"
@@ -886,7 +1042,7 @@ case $opt in
         fi
         new_exp=$(date -d "$base_date + $days days" +%Y-%m-%d)
         /usr/bin/api-vpn renew "$user" "" "$new_exp"
-        echo -e "${GREEN}ต่ออายุบัญชี ${user} (SSH + ZIVPN + Hysteria 2) สำเร็จ! หมดอายุ: ${new_exp}${NC}"
+        echo -e "${GREEN}ต่ออายุบัญชี ${user} (SSH + UDP Custom + ZIVPN + Hysteria 2) สำเร็จ! หมดอายุ: ${new_exp}${NC}"
         ;;
     3)
         echo -e " [1] ระงับบัญชีชั่วคราว (Lock)"
@@ -910,7 +1066,7 @@ case $opt in
         read -rp "พิมพ์ชื่อบัญชีที่ต้องการลบ: " delssh
         if id "$delssh" &>/dev/null; then
             /usr/bin/api-vpn delete "$delssh" "" ""
-            echo -e "${GREEN}ลบบัญชี ${delssh} ออกจากทั้ง SSH, ZIVPN และ Hysteria 2 เรียบร้อยแล้ว!${NC}"
+            echo -e "${GREEN}ลบบัญชี ${delssh} ออกจากทั้ง SSH, UDP Custom, ZIVPN และ Hysteria 2 เรียบร้อยแล้ว!${NC}"
         else
             echo -e "${RED}ไม่พบชื่อบัญชี ${delssh} ในระบบ!${NC}"
         fi
@@ -1264,7 +1420,7 @@ JSON
         ;;
     19)
         clear
-        echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (OpenSSH & SSH-WS) ===${NC}"
+        echo -e "${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (OpenSSH / SSH-WS / UDP Custom) ===${NC}"
         printf "%-18s %-15s %s\n" "Username" "จำนวนที่เชื่อมต่อ" "PID"
         echo -e "---------------------------------------------------"
         has_online=0
@@ -1279,7 +1435,7 @@ JSON
                 has_online=1
             fi
         done
-        [[ $has_online -eq 0 ]] && echo "ไม่มีผู้ใช้ออนไลน์ผ่าน OpenSSH / SSH-WS ในขณะนี้"
+        [[ $has_online -eq 0 ]] && echo "ไม่มีผู้ใช้ออนไลน์ผ่าน OpenSSH / SSH-WS / UDP Custom ในขณะนี้"
 
         echo -e "\n${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (Dropbear Port 109/143) ===${NC}"
         db_pids=$(ps aux | grep -i dropbear | awk '{print $2}')
@@ -1314,7 +1470,7 @@ JSON
         echo -e "${YELLOW}===================================================${NC}"
         ;;
     20)
-        read -rp "กำหนดจำนวนเครื่องสูงสุดต่อ 1 บัญชี (เช่น 2, ใส่ 0 เพื่อปิด): " max_num
+        read -rp "กำหนดจำนวนเครื่องสูงสุดต่อ 1 บัญชี (เช่น 1 หรือ 2, ใส่ 0 เพื่อปิด): " max_num
         echo "$max_num" > /etc/xray/limit-ssh
         echo -e "${GREEN}บันทึกการจำกัดล็อกอินไว้ที่ ${max_num} เครื่อง เรียบร้อยแล้ว!${NC}"
         ;;
@@ -1340,7 +1496,7 @@ JSON
         running
         ;;
     23)
-        systemctl restart rsyslog ssh dropbear nginx php*-fpm xray zivpn hysteria ws-epro udpgw@7100 udpgw@7200 udpgw@7300 fail2ban cron
+        systemctl restart rsyslog ssh dropbear nginx php*-fpm xray zivpn hysteria udp-custom ws-epro udpgw@7100 udpgw@7300 fail2ban cron
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
     24)
@@ -1410,7 +1566,7 @@ JSON
         echo -e "URL API        : ${GREEN}http://${MYIP}:8081/api_ssh.php${NC}"
         echo -e "Secret Key     : ${GREEN}${CUR_KEY}${NC}"
         echo -e "Path ไฟล์ระบบ   : /home/vps/public_html/api_ssh.php"
-        echo -e "การทำงานอัตโนมัติ : สร้าง/ต่ออายุ/ลบ ทั้ง SSH, ZIVPN UDP และ Hysteria 2 พร้อมกัน"
+        echo -e "การทำงานอัตโนมัติ : สร้าง/ต่ออายุ/ลบ ทั้ง SSH, UDP Custom, ZIVPN และ Hysteria 2"
         echo -e "${YELLOW}===========================================================${NC}"
         read -rp "ต้องการเปลี่ยนรหัส Secret Key ใหม่หรือไม่? (พิมพ์รหัสใหม่ หรือกด Enter เพื่อใช้ค่าเดิม): " new_key
         if [[ -n "$new_key" ]]; then
@@ -1454,4 +1610,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "All-in-One VPN Suite (SSH, ZIVPN, Hysteria 2, Web API, Security & Backup) Installed Successfully!"
+echo "All-in-One VPN Suite (SSH, UDP Custom, BadVPN, ZIVPN, Hysteria 2, Web API) Installed Successfully!"
