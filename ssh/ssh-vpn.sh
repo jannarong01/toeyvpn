@@ -295,15 +295,17 @@ systemctl daemon-reload
 systemctl enable udp-custom >/dev/null 2>&1
 systemctl restart udp-custom
 
-# 10. ตั้งค่า Iptables Port Forwarding แบบสะอาด (ให้ 1-65535 วิ่งเข้า UDP Custom 7200 เต็มรูปแบบ)
+# 10. ตั้งค่า Iptables Port Forwarding แยกช่วงพอร์ตชัดเจน (ZIVPN + Hysteria 2 + UDP Custom)
 NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
 iptables -t nat -F PREROUTING
 
-# ยกเว้นพอร์ตหลัก ZIVPN (5667) และ Hysteria 2 (8443)
+# พอร์ตหลักและช่วง Port Hopping ของ ZIVPN (5667 / 6000-19999) และ Hysteria 2 (8443 / 20000-50000)
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 5667 -j ACCEPT
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 8443 -j ACCEPT
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443
 
-# กฎหลักโยนพอร์ต UDP 1-65535 ทั้งหมดเข้าพอร์ต 7200 ของ UDP Custom (เหมือนเครื่อง th8)
+# พอร์ตที่เหลือทั้งหมด (1-5999 และ 50001-65535) โยนเข้าพอร์ต 7200 ของ UDP Custom
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 1:65535 -j DNAT --to-destination :7200
 iptables -t nat -C POSTROUTING -o "$NET_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$NET_IFACE" -j MASQUERADE
 
