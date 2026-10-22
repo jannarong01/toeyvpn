@@ -295,17 +295,15 @@ systemctl daemon-reload
 systemctl enable udp-custom >/dev/null 2>&1
 systemctl restart udp-custom
 
-# 10. ตั้งค่า Iptables Port Forwarding แบบสะอาด (ไม่ให้กฎซ้อนทับกัน)
+# 10. ตั้งค่า Iptables Port Forwarding แบบสะอาด (ให้ 1-65535 วิ่งเข้า UDP Custom 7200 เต็มรูปแบบ)
 NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
 iptables -t nat -F PREROUTING
 
-# กฎสำหรับ ZIVPN (5667) และ Hysteria 2 (8443)
+# ยกเว้นพอร์ตหลัก ZIVPN (5667) และ Hysteria 2 (8443)
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 5667 -j ACCEPT
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 8443 -j ACCEPT
-iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
-iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443
 
-# กฎหลักโยนพอร์ต UDP 1-65535 เข้าพอร์ต 7200 ของ UDP Custom (แบบเดียวกับ th8)
+# กฎหลักโยนพอร์ต UDP 1-65535 ทั้งหมดเข้าพอร์ต 7200 ของ UDP Custom (เหมือนเครื่อง th8)
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 1:65535 -j DNAT --to-destination :7200
 iptables -t nat -C POSTROUTING -o "$NET_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$NET_IFACE" -j MASQUERADE
 
@@ -1554,9 +1552,11 @@ JSON
             /root/update-vpn.sh
             rm -f /root/update-vpn.sh
             echo -e "${GREEN}อัปเดตสคริปต์และเมนูเป็นเวอร์ชันล่าสุดเรียบร้อยแล้ว!${NC}"
+            exit 0
         else
             rm -f /root/update-vpn.sh
             echo -e "${RED}ไม่สามารถดาวน์โหลดไฟล์จาก GitHub ได้ กรุณาตรวจสอบลิงก์หรือการเชื่อมต่ออินเทอร์เน็ต${NC}"
+            exit 1
         fi
         ;;
     28)
