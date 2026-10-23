@@ -26,11 +26,9 @@ apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl 
 if [ ! -s /usr/local/bin/speedtest ]; then
     echo "กำลังติดตั้ง Speedtest by Ookla..."
     ARCH=$(uname -m)
-    if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
-        S_ARCH="aarch64"
-    else
-        S_ARCH="x86_64"
-    fi
+    S_ARCH="x86_64"
+    if [ "$ARCH" = "aarch64" ]; then S_ARCH="aarch64"; fi
+    if [ "$ARCH" = "arm64" ]; then S_ARCH="aarch64"; fi
     wget -q -O /tmp/speedtest.tgz "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${S_ARCH}.tgz"
     tar -xzf /tmp/speedtest.tgz -C /usr/local/bin speedtest 2>/dev/null
     chmod +x /usr/local/bin/speedtest
@@ -1621,10 +1619,12 @@ CONF
     31)
         clear
         echo -e "${YELLOW}====== ทดสอบความเร็วอินเทอร์เน็ตเซิร์ฟเวอร์ (Speedtest by Ookla) ======${NC}"
-        if ! command -v speedtest &>/dev/null; then
+        if [ ! -s /usr/local/bin/speedtest ]; then
             echo -e "${CYAN}กำลังติดตั้ง Speedtest CLI...${NC}"
             ARCH=$(uname -m)
-            [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] && S_ARCH="aarch64" || S_ARCH="x86_64"
+            S_ARCH="x86_64"
+            if [ "$ARCH" = "aarch64" ]; then S_ARCH="aarch64"; fi
+            if [ "$ARCH" = "arm64" ]; then S_ARCH="aarch64"; fi
             wget -q -O /tmp/speedtest.tgz "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${S_ARCH}.tgz"
             tar -xzf /tmp/speedtest.tgz -C /usr/local/bin speedtest 2>/dev/null
             chmod +x /usr/local/bin/speedtest
