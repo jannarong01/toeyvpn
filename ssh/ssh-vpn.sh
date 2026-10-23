@@ -20,7 +20,22 @@ sysctl -p >/dev/null 2>&1
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix php-fpm php-cli php-curl zip unzip rsyslog
+apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix php-fpm php-cli php-curl zip unzip rsyslog tar
+
+# ติดตั้ง Speedtest by Ookla (Official CLI)
+if [ ! -s /usr/local/bin/speedtest ]; then
+    echo "กำลังติดตั้ง Speedtest by Ookla..."
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+        S_ARCH="aarch64"
+    else
+        S_ARCH="x86_64"
+    fi
+    wget -q -O /tmp/speedtest.tgz "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${S_ARCH}.tgz"
+    tar -xzf /tmp/speedtest.tgz -C /usr/local/bin speedtest 2>/dev/null
+    chmod +x /usr/local/bin/speedtest
+    rm -f /tmp/speedtest.tgz
+fi
 
 # เปิดใช้งาน rsyslog และเตรียมไฟล์ Log สำหรับ Ubuntu 24.04 และ Debian 12
 touch /var/log/auth.log /var/log/syslog
@@ -233,7 +248,7 @@ systemctl daemon-reload
 systemctl enable zivpn >/dev/null 2>&1
 systemctl restart zivpn
 
-# 9. ติดตั้ง UDP Custom (พอร์ตภายใน 7200 รับช่วงพอร์ต 1-65535)
+# 9. ติดตั้ง UDP Custom (พอร์ตภายใน 7200)
 echo "กำลังติดตั้ง UDP Custom..."
 mkdir -p /root/udp
 if [ ! -f /usr/local/bin/udp-custom ] || [ $(stat -c%s "/usr/local/bin/udp-custom" 2>/dev/null || echo 0) -lt 1000000 ]; then
@@ -915,7 +930,7 @@ echo -e " Dropbear Service         : $(check_status dropbear)"
 echo -e " Nginx Proxy (80 / 443)   : $(check_status nginx)"
 echo -e " Web API Panel (8081)     : ${API_STAT}"
 echo -e " Xray Core (Vmess/Vless)  : $(check_status xray)"
-echo -e " UDP Custom (1-65535/7200): $(check_status udp-custom)"
+echo -e " UDP Custom (Port 7200)   : $(check_status udp-custom)"
 echo -e " BadVPN UDPGW (Port 7300) : $(check_status udpgw@7300)"
 echo -e " ZIVPN UDP (5667/6000+)   : $(check_status zivpn)"
 echo -e " Hysteria 2 (8443/20000+) : $(check_status hysteria)"
@@ -989,9 +1004,10 @@ echo -e " [27] อัปเดตสคริปต์และเมนูเ�
 echo -e " [28] ดูข้อมูลเชื่อมต่อ API สำหรับเว็บขาย VPN (Port 8081)"
 echo -e " [29] สำรองข้อมูลบัญชีทั้งหมด (Backup & Telegram Bot)"
 echo -e " [30] กู้คืนข้อมูลบัญชีทั้งหมด (Restore ย้ายเซิร์ฟเวอร์)"
+echo -e " [31] ทดสอบความเร็วอินเทอร์เน็ตเซิร์ฟเวอร์ (Speedtest by Ookla)"
 echo -e " [0]  ออกจากเมนู"
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
-read -rp "เลือกเมนู [0-30]: " opt
+read -rp "เลือกเมนู [0-31]: " opt
 
 case $opt in
     1)
@@ -1014,7 +1030,7 @@ case $opt in
         echo -e "Password     : $pass"
         echo -e "OpenSSH      : 22 | Dropbear : 109, 143"
         echo -e "WS Port      : 80 | WS TLS   : 443"
-        echo -e "UDP Custom   : 1-65535 (พอร์ตภายใน 7200)"
+        echo -e "UDP Custom   : 1-5999, 50001-65535 (พอร์ตภายใน 7200)"
         echo -e "BadVPN UDPGW : 7100, 7300"
         echo -e "ZIVPN UDP    : 5667, 6000-19999 (ใช้รหัส $pass)"
         echo -e "Hysteria 2   : 8443, 20000-50000 (ใช้รหัส $pass)"
@@ -1547,7 +1563,7 @@ JSON
         ;;
     27)
         echo -e "${CYAN}กำลังดึงไฟล์อัปเดตล่าสุดจาก GitHub (jannarong01/toeyvpn)...${NC}"
-        wget -q -O /root/update-vpn.sh "https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh"
+        wget -q -O /root/update-vpn.sh "https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh?v=$(date +%s)"
         if [ -s /root/update-vpn.sh ]; then
             sed -i 's/\r$//' /root/update-vpn.sh
             chmod +x /root/update-vpn.sh
@@ -1602,6 +1618,21 @@ CONF
     30)
         /usr/bin/restore-vpn
         ;;
+    31)
+        clear
+        echo -e "${YELLOW}====== ทดสอบความเร็วอินเทอร์เน็ตเซิร์ฟเวอร์ (Speedtest by Ookla) ======${NC}"
+        if ! command -v speedtest &>/dev/null; then
+            echo -e "${CYAN}กำลังติดตั้ง Speedtest CLI...${NC}"
+            ARCH=$(uname -m)
+            [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] && S_ARCH="aarch64" || S_ARCH="x86_64"
+            wget -q -O /tmp/speedtest.tgz "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${S_ARCH}.tgz"
+            tar -xzf /tmp/speedtest.tgz -C /usr/local/bin speedtest 2>/dev/null
+            chmod +x /usr/local/bin/speedtest
+            rm -f /tmp/speedtest.tgz
+        fi
+        /usr/local/bin/speedtest --accept-license --accept-gdpr
+        echo -e "${YELLOW}=================================================================${NC}"
+        ;;
     0)
         exit 0
         ;;
@@ -1612,4 +1643,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "All-in-One VPN Suite (SSH, UDP Custom, BadVPN, ZIVPN, Hysteria 2, Web API) Installed Successfully!"
+echo "All-in-One VPN Suite (SSH, UDP Custom, BadVPN, ZIVPN, Hysteria 2, Web API, Speedtest) Installed Successfully!"
