@@ -3059,6 +3059,31 @@ CONF
         ;;
 esac
 EOF
-chmod +x /usr/bin/menu
+# --- (โค้ดส่วนอื่นๆ ด้านบนตามปกติ) ---
+
+# เพิ่มโค้ดส่วนนี้ก่อนบรรทัดสุดท้ายสุด
+# ------------------------------------------------------------------------------
+#  FIX: ตั้งค่า Iptables NAT และเปิดพอร์ต UDP Custom อัตโนมัติหลังติดตั้งเสร็จ
+# ------------------------------------------------------------------------------
+NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
+
+iptables -t nat -F PREROUTING
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 5667 -j ACCEPT
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 8443 -j ACCEPT
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 1:5999 -j DNAT --to-destination :7200
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 50001:65535 -j DNAT --to-destination :7200
+
+if ! iptables -C INPUT -p udp --dport 7200 -j ACCEPT 2>/dev/null; then
+    iptables -I INPUT -p udp --dport 7200 -j ACCEPT
+fi
+
+netfilter-persistent save >/dev/null 2>&1
+netfilter-persistent reload >/dev/null 2>&1
+systemctl restart udp-custom
+
+# บรรทัดสุดท้ายเดิมที่มีอยู่แล้ว
+Chmod +x /usr/bin/menu
 
 echo "✅ All-in-One VPN Suite + Modern Web Dashboard (Port 8081) Installed Successfully!"
