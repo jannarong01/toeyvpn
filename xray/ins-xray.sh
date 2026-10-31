@@ -151,4 +151,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable xray nginx >/dev/null 2>&1
+mkdir -p /usr/local/etc/xray
+rm -f /usr/local/etc/xray/config.json
+ln -s /etc/xray/config.json /usr/local/etc/xray/config.json
 systemctl restart xray nginx
