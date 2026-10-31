@@ -1811,7 +1811,7 @@ server {
     listen 80;
     listen [::]:80;
     listen 443 ssl http2 reuseport;
-    listen [::]:443 http2 reuseport;
+    listen [::]:443 ssl http2 reuseport;
     server_name ${DOMAIN} _;
 
     ssl_certificate /etc/xray/xray.crt;
@@ -3062,11 +3062,11 @@ CONF
         ;;
 esac
 EOF
-# --- (โค้ดส่วนอื่นๆ ด้านบนตามปกติ) ---
+# ปลดล็อกสิทธิ์คำสั่งเมนูและสคริปต์ระบบทั้งหมด (ใช้ c ตัวพิมพ์เล็ก)
+chmod +x /usr/bin/menu /usr/bin/running /usr/bin/xp /usr/bin/tendang /usr/bin/clear-log /usr/bin/backup-vpn /usr/bin/restore-vpn /usr/bin/api-vpn /usr/bin/panel-cmd /usr/bin/hys-auth /usr/bin/rebuild-hysteria
 
-# เพิ่มโค้ดส่วนนี้ก่อนบรรทัดสุดท้ายสุด
 # ------------------------------------------------------------------------------
-#  FIX: ตั้งค่า Iptables NAT และเปิดพอร์ต UDP Custom อัตโนมัติหลังติดตั้งเสร็จ
+#  FIX 1: ตั้งค่า Iptables NAT และเปิดพอร์ต UDP Custom อัตโนมัติ
 # ------------------------------------------------------------------------------
 NET_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
 
@@ -3086,7 +3086,20 @@ netfilter-persistent save >/dev/null 2>&1
 netfilter-persistent reload >/dev/null 2>&1
 systemctl restart udp-custom
 
-# บรรทัดสุดท้ายเดิมที่มีอยู่แล้ว
-Chmod +x /usr/bin/menu
+# ------------------------------------------------------------------------------
+#  FIX 2: บังคับสิทธิ์ Xray, เชื่อม Symlink และรีสตาร์ทให้สถานะ [ON] 100%
+# ------------------------------------------------------------------------------
+mkdir -p /etc/xray /usr/local/etc/xray /var/log/xray
+touch /var/log/xray/access.log /var/log/xray/error.log
+chmod -R 777 /var/log/xray
+chown -R root:root /var/log/xray /etc/xray /usr/local/etc/xray 2>/dev/null
+
+rm -f /usr/local/etc/xray/config.json
+ln -s /etc/xray/config.json /usr/local/etc/xray/config.json
+
+sed -i 's/User=nobody/User=root/g' /etc/systemd/system/xray.service /etc/systemd/system/xray.service.d/*.conf 2>/dev/null
+systemctl daemon-reload
+systemctl enable xray nginx >/dev/null 2>&1
+systemctl restart xray nginx
 
 echo "✅ All-in-One VPN Suite + Modern Web Dashboard (Port 8081) Installed Successfully!"
