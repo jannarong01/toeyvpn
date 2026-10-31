@@ -4,6 +4,14 @@
 #  Support: Ubuntu 20.04 / 22.04 / 24.04 LTS & Debian 10 / 11 / 12
 # ==============================================================================
 export DEBIAN_FRONTEND=noninteractive
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# 0. รอให้ระบบอัปเดตอัตโนมัติหลังเปิดเครื่องใหม่ (apt/dpkg lock) ทำงานเสร็จก่อนเริ่มติดตั้ง
+while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    echo "⏳ ระบบกำลังอัปเดตแพ็กเกจพื้นหลังของ VPS... กรุณารอสักครู่ (รอปลดล็อก dpkg)"
+    sleep 3
+done
+dpkg --configure -a >/dev/null 2>&1
 
 # 1. ลบ Apache2 และ UFW ป้องกันการแย่งพอร์ต 80
 systemctl stop apache2 >/dev/null 2>&1
@@ -560,7 +568,7 @@ case "$ACTION" in
     list_ssh)
         echo "["
         first=1
-        USERS_LIST=$(tac /etc/passwd | awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}')
+        USERS_LIST=$(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd | tac)
         for u in $USERS_LIST; do
             exp_raw=$(chage -l "$u" 2>/dev/null | grep "Account expires" | awk -F": " '{print $2}')
             if [ "$exp_raw" = "never" ] || [ -z "$exp_raw" ]; then
@@ -1678,9 +1686,6 @@ fi
 netfilter-persistent save >/dev/null 2>&1
 netfilter-persistent reload >/dev/null 2>&1
 systemctl restart nginx
-# ==============================================================================
-#  ซ่อมแซมและติดตั้งส่วนที่ 12 - 17 ที่ขาดหายไป (BadVPN, Dropbear, WS, Menu, Cron)
-# ==============================================================================
 
 # 12. ติดตั้ง BadVPN UDPGW (พอร์ต 7100 และ 7300)
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
@@ -2315,7 +2320,7 @@ case $opt in
         echo -e "${YELLOW}========= รายชื่อบัญชี SSH ทั้งหมด =========${NC}"
         printf "%-18s %-20s %s\n" "Username" "Expire Date" "Status"
         echo -e "---------------------------------------------------"
-        for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
+        for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd | tac); do
             exp=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
             passwd_stat=$(passwd -S "$user" 2>/dev/null | awk '{print $2}')
             if [ "$passwd_stat" = "L" ]; then
@@ -2794,7 +2799,10 @@ JSON
     27)
         echo -e "${CYAN}กำลังดึงไฟล์อัปเดตล่าสุดจาก GitHub (jannarong01/toeyvpn)...${NC}"
         rm -f /root/update-vpn.sh
-        curl -4 -fsSL "https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh?v=$(date +%s)" -o /root/update-vpn.sh 2>/dev/null
+        wget -4 -q --no-check-certificate -O /root/update-vpn.sh "https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh?v=$(date +%s)"
+        if [ ! -s /root/update-vpn.sh ]; then
+            curl -4 -fsSL "https://raw.githubusercontent.com/jannarong01/toeyvpn/main/ssh/ssh-vpn.sh?v=$(date +%s)" -o /root/update-vpn.sh 2>/dev/null
+        fi
         if [ -s /root/update-vpn.sh ]; then
             sed -i 's/\r$//' /root/update-vpn.sh
             chmod +x /root/update-vpn.sh
@@ -2876,4 +2884,4 @@ esac
 EOF
 chmod +x /usr/bin/menu
 
-echo "✅ ติดตั้งส่วนที่ 12 - 17 และสร้างคำสั่ง menu เรียบร้อยแล้ว! พิมพ์ menu ได้เลยครับ"
+echo "✅ All-in-One VPN Suite + Modern Web Dashboard (Port 8081) Installed Successfully!"
