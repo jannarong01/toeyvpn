@@ -97,14 +97,27 @@ for keyword in "get_peers" "announce_peer" "find_node" "BitTorrent" "BitTorrent 
     fi
 done
 
-# 6. เตรียมโฟลเดอร์หลักและใบรับรอง SSL เบื้องต้น
+# 6. เตรียมโฟลเดอร์หลัก, ถามชื่อโดเมน (เฉพาะเครื่องใหม่) และสร้าง SSL เบื้องต้น
 mkdir -p /etc/xray /etc/zivpn /etc/hysteria /home/vps/public_html /root/vnext_api /root/udp
 touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
 MYIP=$(curl -sS ipv4.icanhazip.com)
 DOMAIN=$(cat /etc/xray/domain 2>/dev/null)
+
+# ถ้ายังไม่มีไฟล์โดเมน (ติดตั้งเครื่องใหม่ครั้งแรก) ให้ถามโดเมนก่อน
 if [ -z "$DOMAIN" ]; then
-    DOMAIN="$MYIP"
+    clear
+    echo "======================================================"
+    echo "   🌐 ตั้งค่าโดเมนสำหรับเซิร์ฟเวอร์ VPN เครื่องใหม่"
+    echo "======================================================"
+    read -rp "กรุณากรอกชื่อโดเมนของคุณ (หรือกด Enter เพื่อใช้ IP): " INPUT_DOMAIN
+    if [ -n "$INPUT_DOMAIN" ]; then
+        DOMAIN="$INPUT_DOMAIN"
+    else
+        DOMAIN="$MYIP"
+    fi
+    echo "$DOMAIN" > /etc/xray/domain
+    echo "$DOMAIN" > /root/domain
 fi
 
 if [ ! -s /etc/xray/xray.crt ]; then
@@ -1686,6 +1699,170 @@ fi
 netfilter-persistent save >/dev/null 2>&1
 netfilter-persistent reload >/dev/null 2>&1
 systemctl restart nginx
+
+# 11.5 ติดตั้ง Xray Core, ออกใบรับรอง SSL (Let's Encrypt) และตั้งค่า Nginx (Port 80/443)
+if [ ! -f /usr/local/bin/xray ]; then
+    echo "กำลังติดตั้ง Xray Core..."
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
+fi
+
+# สร้าง config.json ของ Xray เฉพาะกรณีติดตั้งใหม่ (ไม่ทับบัญชีลูกค้าเดิมตอนกดเมนู 27)
+if [ ! -s /etc/xray/config.json ]; then
+    UUID=$(cat /proc/sys/kernel/random/uuid)
+    cat <<JSON > /etc/xray/config.json
+{
+  "log": {
+    "access": "/var/log/xray/access.log",
+    "error": "/var/log/xray/error.log",
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 10001,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "alterId": 0,
+            "email": "default"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vmess"
+        }
+      }
+    },
+    {
+      "port": 10002,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "email": "default"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vless"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+JSON
+fi
+
+mkdir -p /var/log/xray
+chown -R nobody:nogroup /var/log/xray 2>/dev/null
+
+cat << 'SVC' > /etc/systemd/system/xray.service
+[Unit]
+Description=Xray Service
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/xray run -config /etc/xray/config.json
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+# ขอใบรับรอง SSL ของจริง (Let's Encrypt) เฉพาะตอนติดตั้งใหม่ที่ยังไม่ได้ขอ acme.sh
+if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ ! -d "/root/.acme.sh/${DOMAIN}_ecc" ]; then
+    echo "กำลังออกใบรับรอง SSL สำหรับโดเมน ${DOMAIN}..."
+    systemctl stop nginx >/dev/null 2>&1
+    curl https://get.acme.sh | sh -s email=admin@${DOMAIN} >/dev/null 2>&1
+    /root/.acme.sh/acme.sh --upgrade --auto-upgrade >/dev/null 2>&1
+    /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
+    /root/.acme.sh/acme.sh --issue -d "${DOMAIN}" --standalone -k ec-256 --force
+    /root/.acme.sh/acme.sh --installcert -d "${DOMAIN}" \
+        --fullchainpath /etc/xray/xray.crt \
+        --keypath /etc/xray/xray.key --ecc
+    chmod 644 /etc/xray/xray.crt /etc/xray/xray.key
+    /usr/bin/rebuild-hysteria
+fi
+
+# สร้างไฟล์คอนฟิก Nginx พอร์ต 80 และ 443 (/vmess, /vless, และ /ssh-ws)
+cat <<NGX > /etc/nginx/conf.d/xray.conf
+server {
+    listen 80;
+    listen [::]:80;
+    listen 443 ssl http2 reuseport;
+    listen [::]:443 http2 reuseport;
+    server_name ${DOMAIN} _;
+
+    ssl_certificate /etc/xray/xray.crt;
+    ssl_certificate_key /etc/xray/xray.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location = /vmess {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:10001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
+    location = /vless {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:10002;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
+    location / {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:10015;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+}
+NGX
+
+for xport in 80 443; do
+    if ! iptables -C INPUT -p tcp --dport "$xport" -j ACCEPT 2>/dev/null; then
+        iptables -I INPUT -p tcp --dport "$xport" -j ACCEPT
+    fi
+done
+netfilter-persistent save >/dev/null 2>&1
+systemctl daemon-reload
+systemctl enable xray nginx >/dev/null 2>&1
+systemctl restart xray nginx
 
 # 12. ติดตั้ง BadVPN UDPGW (พอร์ต 7100 และ 7300)
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
