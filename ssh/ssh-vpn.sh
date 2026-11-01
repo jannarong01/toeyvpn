@@ -1806,12 +1806,31 @@ if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ ! -d "/root/.acme.
 fi
 
 # สร้างไฟล์คอนฟิก Nginx พอร์ต 80 และ 443 (/vmess, /vless, และ /ssh-ws)
+# ตั้งค่า Nginx Stream Multiplexer แยกทราฟฟิกพอร์ต 443 (SSL-SSH vs Xray/WS)
+sed -i '/stream_mux.conf/d' /etc/nginx/nginx.conf
+echo "include /etc/nginx/stream_mux.conf;" >> /etc/nginx/nginx.conf
+
+cat << 'MUX' > /etc/nginx/stream_mux.conf
+stream {
+    map $ssl_preread_alpn_protocols $tls_backend {
+        "~\bh2\b"      127.0.0.1:8443;
+        "~\bhttp/1\.1\b" 127.0.0.1:8443;
+        default        127.0.0.1:10443;
+    }
+    server {
+        listen 443 reuseport;
+        listen [::]:443 reuseport;
+        proxy_pass $tls_backend;
+        ssl_preread on;
+    }
+}
+MUX
+
 cat <<NGX > /etc/nginx/conf.d/xray.conf
 server {
     listen 80;
     listen [::]:80;
-    listen 443 ssl http2 reuseport;
-    listen [::]:443 ssl http2 reuseport;
+    listen 127.0.0.1:8443 ssl http2 reuseport;
     server_name ${DOMAIN} _;
 
     ssl_certificate /etc/xray/xray.crt;
@@ -1997,6 +2016,60 @@ EOF
 systemctl daemon-reload
 systemctl enable ws-epro >/dev/null 2>&1
 systemctl restart ws-epro
+
+# 13.5 ติดตั้ง Stunnel4 สำหรับโหมด SSL/TLS -> SSH (Direct SSL Port 443, 444, 777)
+apt-get install -y stunnel4 libnginx-mod-stream >/dev/null 2>&1
+mkdir -p /etc/stunnel /var/run/stunnel4
+cat /etc/xray/xray.crt /etc/xray/xray.key > /etc/stunnel/stunnel.pem
+chmod 600 /etc/stunnel/stunnel.pem
+
+cat << 'EOF' > /etc/stunnel/stunnel.conf
+pid = /var/run/stunnel4/stunnel.pid
+cert = /etc/stunnel/stunnel.pem
+client = no
+socket = a:SO_REUSEADDR=1
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+
+[dropbear-mux]
+accept = 127.0.0.1:10443
+connect = 127.0.0.1:109
+
+[dropbear-ssl]
+accept = 444
+connect = 127.0.0.1:109
+
+[openssh-ssl]
+accept = 777
+connect = 127.0.0.1:22
+EOF
+
+sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null
+
+cat << 'EOF' > /etc/systemd/system/stunnel4.service
+[Unit]
+Description=SSL Tunnel for SSH/Dropbear
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/stunnel4 /etc/stunnel/stunnel.conf
+PIDFile=/var/run/stunnel4/stunnel.pid
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+for sport in 444 777; do
+    if ! iptables -C INPUT -p tcp --dport "$sport" -j ACCEPT 2>/dev/null; then
+        iptables -I INPUT -p tcp --dport "$sport" -j ACCEPT
+    fi
+done
+systemctl daemon-reload
+systemctl enable stunnel4 >/dev/null 2>&1
+systemctl restart stunnel4
 
 # 14. สร้างสคริปต์ลบบัญชีหมดอายุอัตโนมัติ (xp)
 cat << 'EOF' > /usr/bin/xp
