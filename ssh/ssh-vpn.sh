@@ -1706,10 +1706,13 @@ if [ ! -f /usr/local/bin/xray ]; then
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
 fi
 
-# สร้าง config.json ของ Xray เฉพาะกรณีติดตั้งใหม่ (ไม่ทับบัญชีลูกค้าเดิมตอนกดเมนู 27)
-if [ ! -s /etc/xray/config.json ]; then
+# บังคับสร้าง config.json ของ Xray ใหม่ให้รองรับ Fallbacks (SSL-SSH + WS + Xray ในพอร์ต 443)
+UUID=$(jq -r '.inbounds[0].settings.clients[0].id' /etc/xray/config.json 2>/dev/null)
+if [ -z "$UUID" ] || [ "$UUID" = "null" ]; then
     UUID=$(cat /proc/sys/kernel/random/uuid)
-    cat <<JSON > /etc/xray/config.json
+fi
+
+cat <<JSON > /etc/xray/config.json
 {
   "log": {
     "access": "/var/log/xray/access.log",
@@ -1765,10 +1768,23 @@ if [ ! -s /etc/xray/config.json ]; then
   ]
 }
 JSON
+
+# ดึงรายชื่อบัญชี Xray เดิม (ถ้ามี) กลับเข้าไฟล์คอนฟิกอัตโนมัติ
+if [ -s /etc/xray/xray-exp.txt ]; then
+    while IFS=':' read -r u exp; do
+        [ -z "$u" ] && continue
+        if ! grep -q "^${u}:" /etc/xray/xray-lock.txt 2>/dev/null; then
+            u_id=$(cat /proc/sys/kernel/random/uuid)
+            jq --arg usr "$u" --arg id "$u_id" \
+               '.inbounds[0].settings.clients += [{"id": $id, "alterId": 0, "email": $usr}] |
+                .inbounds[1].settings.clients += [{"id": $id, "email": $usr}]' \
+               /etc/xray/config.json > /tmp/xray_tmp.json && mv /tmp/xray_tmp.json /etc/xray/config.json
+        fi
+    done < /etc/xray/xray-exp.txt
 fi
 
 mkdir -p /var/log/xray
-chown -R nobody:nogroup /var/log/xray 2>/dev/null
+chmod -R 777 /var/log/xray
 
 cat << 'SVC' > /etc/systemd/system/xray.service
 [Unit]
@@ -1790,7 +1806,7 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 SVC
 
-# ขอใบรับรอง SSL ของจริง (Let's Encrypt) เฉพาะตอนติดตั้งใหม่ที่ยังไม่ได้ขอ acme.sh
+# ขอใบรับรอง SSL ของจริง (Let's Encrypt)
 if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ ! -d "/root/.acme.sh/${DOMAIN}_ecc" ]; then
     echo "กำลังออกใบรับรอง SSL สำหรับโดเมน ${DOMAIN}..."
     systemctl stop nginx >/dev/null 2>&1
@@ -1805,17 +1821,17 @@ if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ ! -d "/root/.acme.
     /usr/bin/rebuild-hysteria
 fi
 
-# สร้างไฟล์คอนฟิก Nginx พอร์ต 80 และ 443 (/vmess, /vless, และ /ssh-ws)
-# ตั้งค่า Nginx Stream Multiplexer แยกทราฟฟิกพอร์ต 443 (SSL-SSH vs Xray/WS)
+# ล้างค่า stream_mux เดิมที่เคยทำให้ Nginx พัง และติดตั้งโมดูล Stream ให้พร้อมก่อนเริ่ม Nginx
 sed -i '/stream_mux.conf/d' /etc/nginx/nginx.conf
-echo "include /etc/nginx/stream_mux.conf;" >> /etc/nginx/nginx.conf
+rm -f /etc/nginx/stream_mux.conf
+apt-get install -y libnginx-mod-stream stunnel4 >/dev/null 2>&1
 
 cat << 'MUX' > /etc/nginx/stream_mux.conf
 stream {
     map $ssl_preread_alpn_protocols $tls_backend {
-        "~\bh2\b"      127.0.0.1:8443;
+        "~\bh2\b"        127.0.0.1:8443;
         "~\bhttp/1\.1\b" 127.0.0.1:8443;
-        default        127.0.0.1:10443;
+        default          127.0.0.1:10443;
     }
     server {
         listen 443 reuseport;
@@ -1825,6 +1841,7 @@ stream {
     }
 }
 MUX
+echo "include /etc/nginx/stream_mux.conf;" >> /etc/nginx/nginx.conf
 
 cat <<NGX > /etc/nginx/conf.d/xray.conf
 server {
