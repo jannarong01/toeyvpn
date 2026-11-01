@@ -102,7 +102,7 @@ if [ ! -s /etc/xray/config.json ]; then
 EOF
 fi
 
-# 4. ตั้งค่า Nginx สำหรับพอร์ต 80 และ 443
+# 4. ตั้งค่า Nginx สำหรับพอร์ต 80 และ 8443 (ทำงานร่วมกับ Stream Multiplexer พอร์ต 443)
 rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 rm -f /etc/nginx/conf.d/default.conf
 
@@ -110,8 +110,7 @@ cat << 'EOF' > /etc/nginx/conf.d/xray.conf
 server {
     listen 80;
     listen [::]:80;
-    listen 443 ssl http2 reuseport;
-    listen [::]:443 ssl http2 reuseport;
+    listen 127.0.0.1:8443 ssl http2 reuseport;
     server_name _;
 
     ssl_certificate /etc/xray/xray.crt;
