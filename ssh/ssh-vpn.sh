@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-#  ALL-IN-ONE VPN SUITE: SSH/WS, UDP CUSTOM, BADVPN, ZIVPN, HYSTERIA 2, WEB PANEL
+#  ALL-IN-ONE VPN SUITE: SSH/WS, SSL/TLS, UDP CUSTOM, BADVPN, ZIVPN, HYSTERIA 2
 #  Support: Ubuntu 20.04 / 22.04 / 24.04 LTS & Debian 10 / 11 / 12
 # ==============================================================================
 export DEBIAN_FRONTEND=noninteractive
@@ -26,11 +26,11 @@ if ! grep -qxF 'net.ipv4.ip_forward=1' /etc/sysctl.conf; then
 fi
 sysctl -p >/dev/null 2>&1
 
-# 3. ติดตั้งแพ็กเกจหลัก + PHP-FPM + Fail2Ban + Iptables-Persistent + Zip/Unzip + Rsyslog
+# 3. ติดตั้งแพ็กเกจหลัก + Stunnel4 + Nginx Stream + PHP-FPM + Fail2Ban + Iptables
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get update -y
-apt-get install -y nginx dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix php-fpm php-cli php-curl zip unzip rsyslog tar util-linux
+apt-get install -y nginx libnginx-mod-stream stunnel4 dropbear vnstat curl wget jq python3 net-tools openssl socat cron fail2ban iptables iptables-persistent psmisc dos2unix php-fpm php-cli php-curl zip unzip rsyslog tar util-linux
 
 # ติดตั้ง Speedtest by Ookla (Official CLI)
 if [ ! -s /usr/local/bin/speedtest ]; then
@@ -104,7 +104,6 @@ touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /e
 MYIP=$(curl -sS ipv4.icanhazip.com)
 DOMAIN=$(cat /etc/xray/domain 2>/dev/null)
 
-# ถ้ายังไม่มีไฟล์โดเมน (ติดตั้งเครื่องใหม่ครั้งแรก) ให้ถามโดเมนก่อน
 if [ -z "$DOMAIN" ]; then
     clear
     echo "======================================================"
@@ -354,7 +353,8 @@ iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 5667 -j ACCEPT
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 8443 -j ACCEPT
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
 iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :8443
-iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 1:65535 -j DNAT --to-destination :7200
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 1:5999 -j DNAT --to-destination :7200
+iptables -t nat -A PREROUTING -i "$NET_IFACE" -p udp --dport 50001:65535 -j DNAT --to-destination :7200
 
 if ! iptables -t nat -C POSTROUTING -o "$NET_IFACE" -j MASQUERADE 2>/dev/null; then
     iptables -t nat -A POSTROUTING -o "$NET_IFACE" -j MASQUERADE
@@ -551,7 +551,7 @@ case "$ACTION" in
             SSH_ON=$((SSH_ON + c))
         done
 
-        Services=("ssh" "dropbear" "nginx" "xray" "udp-custom" "udpgw@7300" "zivpn" "hysteria" "ws-epro" "fail2ban")
+        Services=("ssh" "dropbear" "stunnel4" "nginx" "xray" "udp-custom" "udpgw@7300" "zivpn" "hysteria" "ws-epro" "fail2ban")
         SVC_JSON="{"
         first=1
         for s in "${Services[@]}"; do
@@ -773,7 +773,7 @@ case "$ACTION" in
         ;;
 
     restart_all)
-        (sleep 1 && systemctl restart rsyslog ssh dropbear xray zivpn hysteria udp-custom ws-epro udpgw@7100 udpgw@7300 fail2ban cron nginx) >/dev/null 2>&1 &
+        (sleep 1 && systemctl restart rsyslog ssh dropbear stunnel4 xray zivpn hysteria udp-custom ws-epro udpgw@7100 udpgw@7300 fail2ban cron nginx) >/dev/null 2>&1 &
         echo '{"success":true,"msg":"กำลังรีสตาร์ทบริการทั้งหมด (รอประมาณ 3 วินาที)"}'
         ;;
 
@@ -880,7 +880,7 @@ EOF
 
 cp -f /home/vps/public_html/api_ssh.php /root/vnext_api/api_ssh.php
 
-# สร้างหน้า Web Dashboard (Modern Glassmorphism UI + ระบบจำสิทธิ์ Cookie HMAC ป้องกันเด้งหลุด)
+# สร้างหน้า Web Dashboard (Modern Glassmorphism UI + ระบบจำสิทธิ์ Cookie HMAC)
 cat << 'EOF' > /home/vps/public_html/index.php
 <?php
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
@@ -1144,7 +1144,7 @@ if (isset($_GET['ajax']) && !empty($_SESSION['vpn_admin_logged'])) {
                     </div>
                 </div>
                 <div id="stat-online" class="text-lg sm:text-xl font-bold text-emerald-400 mt-1">0 เครื่อง</div>
-                <div class="text-[11px] text-slate-400 mt-1">SSH / WS / UDP Custom</div>
+                <div class="text-[11px] text-slate-400 mt-1">SSH / SSL / WS / UDP</div>
             </div>
         </div>
 
@@ -1182,7 +1182,7 @@ if (isset($_GET['ajax']) && !empty($_SESSION['vpn_admin_logged'])) {
                     </div>
                     <div>
                         <h3 class="text-sm font-bold text-white">สร้างบัญชี All-in-One ใหม่</h3>
-                        <p class="text-[11px] text-slate-400">ใช้ได้พร้อมกันทั้ง SSH-WS, UDP Custom (1-65535), ZIVPN และ Hysteria 2</p>
+                        <p class="text-[11px] text-slate-400">ใช้ได้พร้อมกันทั้ง SSH-WS, SSL/TLS (443/444/777), UDP Custom, ZIVPN และ Hysteria 2</p>
                     </div>
                 </div>
                 <form onsubmit="addSshUser(event)" class="grid grid-cols-1 sm:grid-cols-4 gap-3">
@@ -1318,7 +1318,7 @@ if (isset($_GET['ajax']) && !empty($_SESSION['vpn_admin_logged'])) {
                 </div>
                 <button onclick="closeModal()" class="text-slate-400 hover:text-white"><i class="ri-close-line text-xl"></i></button>
             </div>
-            <textarea id="modal-text" readonly rows="11" class="w-full bg-slate-950/90 border border-slate-800 rounded-xl p-3.5 text-xs text-cyan-200 font-mono focus:outline-none"></textarea>
+            <textarea id="modal-text" readonly rows="12" class="w-full bg-slate-950/90 border border-slate-800 rounded-xl p-3.5 text-xs text-cyan-200 font-mono focus:outline-none"></textarea>
             <div class="flex gap-2">
                 <button onclick="copyModalText()" class="flex-1 bg-gradient-to-r from-cyan-400 to-blue-500 text-slate-950 font-bold py-2.5 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-1.5">
                     <i class="ri-file-copy-2-line"></i> คัดลอกข้อมูลทั้งหมด
@@ -1380,6 +1380,7 @@ if (isset($_GET['ajax']) && !empty($_SESSION['vpn_admin_logged'])) {
                 const labels = {
                     'ssh': 'OpenSSH (22)',
                     'dropbear': 'Dropbear (109/143)',
+                    'stunnel4': 'SSL/TLS (443/444/777)',
                     'nginx': 'Nginx (80/443)',
                     'xray': 'Xray Core',
                     'udp-custom': 'UDP Custom (7200)',
@@ -1417,6 +1418,7 @@ Password      : ${pass}
 ---------------------------------
 • SSH / WS Port : 22, 80, 443
 • Dropbear Port : 109, 143
+• SSL/TLS Port  : 443, 444 (Dropbear), 777 (OpenSSH)
 • UDP Custom    : 1-5999, 50001-65535
 • BadVPN UDPGW  : 7300
 • ZIVPN UDP     : 5667, 6000-19999 (รหัส: ${pass})
@@ -1508,7 +1510,7 @@ ${hysHop}`;
 
         async function setPass(user, oldPass) {
             const def = oldPass === '-' ? '' : oldPass;
-            const pass = prompt(`กำหนดหรือบันทึกรหัสผ่านสำหรับบัญชี "${user}"\n(ซิงค์เข้า SSH, UDP Custom, ZIVPN และ Hysteria 2 ทันที):`, def);
+            const pass = prompt(`กำหนดหรือบันทึกรหัสผ่านสำหรับบัญชี "${user}"\n(ซิงค์เข้า SSH, SSL, UDP Custom, ZIVPN และ Hysteria 2 ทันที):`, def);
             if (!pass) return;
             const fd = new FormData();
             fd.append('user', user);
@@ -1698,15 +1700,12 @@ if ! iptables -C INPUT -p tcp --dport 8081 -j ACCEPT 2>/dev/null; then
 fi
 netfilter-persistent save >/dev/null 2>&1
 netfilter-persistent reload >/dev/null 2>&1
-systemctl restart nginx
-
-# 11.5 ติดตั้ง Xray Core, ออกใบรับรอง SSL (Let's Encrypt) และตั้งค่า Nginx (Port 80/443)
+# 11.5 ติดตั้ง Xray Core, ออกใบรับรอง SSL (Let's Encrypt) และตั้งค่า Nginx Stream Multiplexer (Port 80/443)
 if [ ! -f /usr/local/bin/xray ]; then
     echo "กำลังติดตั้ง Xray Core..."
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root >/dev/null 2>&1
 fi
 
-# บังคับสร้าง config.json ของ Xray ใหม่ให้รองรับ Fallbacks (SSL-SSH + WS + Xray ในพอร์ต 443)
 UUID=$(jq -r '.inbounds[0].settings.clients[0].id' /etc/xray/config.json 2>/dev/null)
 if [ -z "$UUID" ] || [ "$UUID" = "null" ]; then
     UUID=$(cat /proc/sys/kernel/random/uuid)
@@ -1769,7 +1768,6 @@ cat <<JSON > /etc/xray/config.json
 }
 JSON
 
-# ดึงรายชื่อบัญชี Xray เดิม (ถ้ามี) กลับเข้าไฟล์คอนฟิกอัตโนมัติ
 if [ -s /etc/xray/xray-exp.txt ]; then
     while IFS=':' read -r u exp; do
         [ -z "$u" ] && continue
@@ -1806,7 +1804,6 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 SVC
 
-# ขอใบรับรอง SSL ของจริง (Let's Encrypt)
 if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ ! -d "/root/.acme.sh/${DOMAIN}_ecc" ]; then
     echo "กำลังออกใบรับรอง SSL สำหรับโดเมน ${DOMAIN}..."
     systemctl stop nginx >/dev/null 2>&1
@@ -1821,10 +1818,8 @@ if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ ! -d "/root/.acme.
     /usr/bin/rebuild-hysteria
 fi
 
-# ล้างค่า stream_mux เดิมที่เคยทำให้ Nginx พัง และติดตั้งโมดูล Stream ให้พร้อมก่อนเริ่ม Nginx
 sed -i '/stream_mux.conf/d' /etc/nginx/nginx.conf
 rm -f /etc/nginx/stream_mux.conf
-apt-get install -y libnginx-mod-stream stunnel4 >/dev/null 2>&1
 
 cat << 'MUX' > /etc/nginx/stream_mux.conf
 stream {
@@ -1896,12 +1891,6 @@ for xport in 80 443; do
     fi
 done
 netfilter-persistent save >/dev/null 2>&1
-systemctl daemon-reload
-systemctl enable xray nginx >/dev/null 2>&1
-mkdir -p /usr/local/etc/xray
-rm -f /usr/local/etc/xray/config.json
-ln -s /etc/xray/config.json /usr/local/etc/xray/config.json
-systemctl restart xray nginx
 
 # 12. ติดตั้ง BadVPN UDPGW (พอร์ต 7100 และ 7300)
 if [ ! -s /usr/local/bin/badvpn-udpgw ]; then
@@ -2035,7 +2024,6 @@ systemctl enable ws-epro >/dev/null 2>&1
 systemctl restart ws-epro
 
 # 13.5 ติดตั้ง Stunnel4 สำหรับโหมด SSL/TLS -> SSH (Direct SSL Port 443, 444, 777)
-apt-get install -y stunnel4 libnginx-mod-stream >/dev/null 2>&1
 mkdir -p /etc/stunnel /var/run/stunnel4
 cat /etc/xray/xray.crt /etc/xray/xray.key > /etc/stunnel/stunnel.pem
 chmod 600 /etc/stunnel/stunnel.pem
@@ -2359,9 +2347,9 @@ if [ -f "$RESTORE_DIR/api/api_ssh.php" ]; then
 fi
 
 rm -rf "$RESTORE_ZIP" "$RESTORE_DIR"
-systemctl restart ssh dropbear xray zivpn hysteria udp-custom nginx >/dev/null 2>&1
+systemctl restart ssh dropbear stunnel4 xray zivpn hysteria udp-custom nginx >/dev/null 2>&1
 
-echo -e "${GREEN}กู้คืนข้อมูลบัญชีทั้งหมด (SSH, UDP Custom, Xray, ZIVPN, Hysteria 2 และ API) เรียบร้อยแล้ว!${NC}"
+echo -e "${GREEN}กู้คืนข้อมูลบัญชีทั้งหมด (SSH, SSL, UDP Custom, Xray, ZIVPN, Hysteria 2 และ API) เรียบร้อยแล้ว!${NC}"
 EOF
 chmod +x /usr/bin/restore-vpn
 
@@ -2414,20 +2402,21 @@ clear
 echo -e "${YELLOW}=========================================${NC}"
 echo -e "           ${CYAN}STATUS RUNNING SERVICE${NC}"
 echo -e "${YELLOW}=========================================${NC}"
-echo -e " OpenSSH Service          : $(check_status ssh)"
-echo -e " Dropbear Service         : $(check_status dropbear)"
-echo -e " Nginx Proxy (80 / 443)   : $(check_status nginx)"
-echo -e " Web Panel & API (8081)   : ${API_STAT}"
-echo -e " Xray Core (Vmess/Vless)  : $(check_status xray)"
-echo -e " UDP Custom (Port 7200)   : $(check_status udp-custom)"
-echo -e " BadVPN UDPGW (Port 7300) : $(check_status udpgw@7300)"
-echo -e " ZIVPN UDP (5667/6000+)   : $(check_status zivpn)"
-echo -e " Hysteria 2 (8443/20000+) : $(check_status hysteria)"
-echo -e " SSH WebSocket (10015)    : $(check_status ws-epro)"
-echo -e " Fail2Ban (Anti-Brute)    : $(check_status fail2ban)"
-echo -e " Anti-Torrent Firewall    : ${TORRENT_STAT}"
-echo -e " Cron (Auto-Kill / Exp)   : $(check_status cron)"
-echo -e " Auto-Reboot Schedule     : ${GREEN}${REBOOT_STAT}${NC}"
+echo -e " OpenSSH Service           : $(check_status ssh)"
+echo -e " Dropbear Service          : $(check_status dropbear)"
+echo -e " Stunnel4 SSL (443/444/777): $(check_status stunnel4)"
+echo -e " Nginx Proxy (80 / 443)    : $(check_status nginx)"
+echo -e " Web Panel & API (8081)    : ${API_STAT}"
+echo -e " Xray Core (Vmess/Vless)   : $(check_status xray)"
+echo -e " UDP Custom (Port 7200)    : $(check_status udp-custom)"
+echo -e " BadVPN UDPGW (Port 7300)  : $(check_status udpgw@7300)"
+echo -e " ZIVPN UDP (5667/6000+)    : $(check_status zivpn)"
+echo -e " Hysteria 2 (8443/20000+)  : $(check_status hysteria)"
+echo -e " SSH WebSocket (10015)     : $(check_status ws-epro)"
+echo -e " Fail2Ban (Anti-Brute)     : $(check_status fail2ban)"
+echo -e " Anti-Torrent Firewall     : ${TORRENT_STAT}"
+echo -e " Cron (Auto-Kill / Exp)    : $(check_status cron)"
+echo -e " Auto-Reboot Schedule      : ${GREEN}${REBOOT_STAT}${NC}"
 echo -e "${YELLOW}=========================================${NC}"
 EOF
 chmod +x /usr/bin/running
@@ -2463,7 +2452,7 @@ echo -e " RAM Usage   : ${GREEN}${RAM_USAGE}${NC}"
 echo -e " Multi-Login : ${GREEN}สูงสุด ${MAX_LOGIN} เครื่อง/บัญชี${NC}"
 echo -e " Auto-Reboot : ${GREEN}${REBOOT_STAT}${NC}"
 echo -e "${YELLOW}☉—————— [ จัดการบัญชี SSH / ZIVPN / HYS2 ] ——————☉${NC}"
-echo -e " [1]  สร้างบัญชี All-in-One (SSH + UDP Custom + ZIVPN + Hys2)"
+echo -e " [1]  สร้างบัญชี All-in-One (SSH + SSL + UDP + ZIVPN + Hys2)"
 echo -e " [2]  ต่ออายุบัญชี All-in-One (Renew)"
 echo -e " [3]  ระงับ / ปลดล็อกบัญชี SSH (Lock/Unlock)"
 echo -e " [4]  ลบบัญชี All-in-One (Delete)"
@@ -2521,11 +2510,12 @@ case $opt in
         HYS_LINK="hysteria2://${pass_enc}@${DOMAIN}:8443/?insecure=1&sni=${DOMAIN}#${user}-Hysteria2"
         HYS_HOP="hysteria2://${pass_enc}@${DOMAIN}:20000/?insecure=1&sni=${DOMAIN}&mport=20000-50000#${user}-Hys2-Hopping"
         clear
-        echo -e "${YELLOW}=== ข้อมูลบัญชี SSH, UDP Custom, ZIVPN & Hysteria 2 ===${NC}"
+        echo -e "${YELLOW}=== ข้อมูลบัญชี SSH, SSL, UDP Custom, ZIVPN & Hysteria 2 ===${NC}"
         echo -e "Host/IP      : $DOMAIN ($MYIP)"
         echo -e "Username     : $user"
         echo -e "Password     : $pass"
         echo -e "OpenSSH      : 22 | Dropbear : 109, 143"
+        echo -e "SSL/TLS Port : 443, 444 (Dropbear) | 777 (OpenSSH)"
         echo -e "WS Port      : 80 | WS TLS   : 443"
         echo -e "UDP Custom   : 1-5999, 50001-65535 (พอร์ตภายใน 7200)"
         echo -e "BadVPN UDPGW : 7100, 7300"
@@ -2556,7 +2546,7 @@ case $opt in
         fi
         new_exp=$(date -d "$base_date + $days days" +%Y-%m-%d)
         /usr/bin/api-vpn renew "$user" "" "$new_exp"
-        echo -e "${GREEN}ต่ออายุบัญชี ${user} (SSH + UDP Custom + ZIVPN + Hysteria 2) สำเร็จ! หมดอายุ: ${new_exp}${NC}"
+        echo -e "${GREEN}ต่ออายุบัญชี ${user} (SSH + SSL + UDP Custom + ZIVPN + Hysteria 2) สำเร็จ! หมดอายุ: ${new_exp}${NC}"
         ;;
     3)
         echo -e " [1] ระงับบัญชีชั่วคราว (Lock)"
@@ -2580,7 +2570,7 @@ case $opt in
         read -rp "พิมพ์ชื่อบัญชีที่ต้องการลบ: " delssh
         if id "$delssh" >/dev/null 2>&1; then
             /usr/bin/api-vpn delete "$delssh" "" ""
-            echo -e "${GREEN}ลบบัญชี ${delssh} ออกจากทั้ง SSH, UDP Custom, ZIVPN และ Hysteria 2 เรียบร้อยแล้ว!${NC}"
+            echo -e "${GREEN}ลบบัญชี ${delssh} ออกจากทั้ง SSH, SSL, UDP Custom, ZIVPN และ Hysteria 2 เรียบร้อยแล้ว!${NC}"
         else
             echo -e "${RED}ไม่พบชื่อบัญชี ${delssh} ในระบบ!${NC}"
         fi
@@ -2954,7 +2944,7 @@ JSON
         done
         [ $has_online -eq 0 ] && echo "ไม่มีผู้ใช้ออนไลน์ผ่าน OpenSSH / SSH-WS / UDP Custom ในขณะนี้"
 
-        echo -e "\n${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (Dropbear Port 109/143) ===${NC}"
+        echo -e "\n${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ (Dropbear / SSL Port 109/143/443/444) ===${NC}"
         db_pids=$(ps aux | grep -i dropbear | awk '{print $2}')
         has_db=0
         for pid in $db_pids; do
@@ -2965,7 +2955,7 @@ JSON
                 has_db=1
             fi
         done
-        [ $has_db -eq 0 ] && echo "ไม่มีผู้ใช้ออนไลน์ผ่าน Dropbear ในขณะนี้"
+        [ $has_db -eq 0 ] && echo "ไม่มีผู้ใช้ออนไลน์ผ่าน Dropbear / SSL ในขณะนี้"
 
         echo -e "\n${YELLOW}=== รายชื่อผู้ใช้ออนไลน์ล่าสุด (Xray Vmess/Vless) ===${NC}"
         if [ -s /var/log/xray/access.log ]; then
@@ -3009,15 +2999,17 @@ JSON
         /root/.acme.sh/acme.sh --installcert -d "${newdom}" \
             --fullchainpath /etc/xray/xray.crt \
             --keypath /etc/xray/xray.key --ecc
+        cat /etc/xray/xray.crt /etc/xray/xray.key > /etc/stunnel/stunnel.pem
+        chmod 600 /etc/stunnel/stunnel.pem
         systemctl start nginx
-        systemctl restart xray hysteria
-        echo -e "${GREEN}อัปเดตโดเมนและติดตั้ง SSL สำหรับ Xray และ Hysteria 2 เรียบร้อยแล้ว!${NC}"
+        systemctl restart stunnel4 xray hysteria
+        echo -e "${GREEN}อัปเดตโดเมนและติดตั้ง SSL สำหรับ Stunnel4, Xray และ Hysteria 2 เรียบร้อยแล้ว!${NC}"
         ;;
     22)
         running
         ;;
     23)
-        systemctl restart rsyslog ssh dropbear nginx php*-fpm xray zivpn hysteria udp-custom ws-epro udpgw@7100 udpgw@7300 fail2ban cron
+        systemctl restart rsyslog ssh dropbear stunnel4 nginx php*-fpm xray zivpn hysteria udp-custom ws-epro udpgw@7100 udpgw@7300 fail2ban cron
         echo -e "${GREEN}รีสตาร์ทบริการทั้งหมดเรียบร้อยแล้ว!${NC}"
         ;;
     24)
@@ -3152,6 +3144,7 @@ CONF
         ;;
 esac
 EOF
+
 # ปลดล็อกสิทธิ์คำสั่งเมนูและสคริปต์ระบบทั้งหมด (ใช้ c ตัวพิมพ์เล็ก)
 chmod +x /usr/bin/menu /usr/bin/running /usr/bin/xp /usr/bin/tendang /usr/bin/clear-log /usr/bin/backup-vpn /usr/bin/restore-vpn /usr/bin/api-vpn /usr/bin/panel-cmd /usr/bin/hys-auth /usr/bin/rebuild-hysteria
 
@@ -3189,7 +3182,7 @@ ln -s /etc/xray/config.json /usr/local/etc/xray/config.json
 
 sed -i 's/User=nobody/User=root/g' /etc/systemd/system/xray.service /etc/systemd/system/xray.service.d/*.conf 2>/dev/null
 systemctl daemon-reload
-systemctl enable xray nginx >/dev/null 2>&1
-systemctl restart xray nginx
+systemctl enable stunnel4 xray nginx >/dev/null 2>&1
+systemctl restart stunnel4 xray nginx
 
 echo "✅ All-in-One VPN Suite + Modern Web Dashboard (Port 8081) Installed Successfully!"
