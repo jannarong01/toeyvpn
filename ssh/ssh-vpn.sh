@@ -100,7 +100,7 @@ done
 
 # 6. เตรียมโฟลเดอร์หลัก, ถามชื่อโดเมน (เฉพาะเครื่องใหม่) และสร้าง SSL เบื้องต้น
 mkdir -p /etc/xray /etc/zivpn /etc/hysteria /home/vps/public_html /root/vnext_api /root/udp
-touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
+touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/xray/trial-exp.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
 MYIP=$(curl -sS ipv4.icanhazip.com)
 DOMAIN=$(cat /etc/xray/domain 2>/dev/null)
@@ -367,7 +367,7 @@ for uport in 7200 5667 8443; do
     fi
 done
 
-# 11. ติดตั้งระบบ Web API & Web Dashboard (Port 8081)
+# 11. ติดตั้งระบบ Web API & Web Dashboard (Port 8081) รองรับทั้งรายวันและรายชั่วโมง (hours=1)
 cat << 'EOF' > /usr/bin/api-vpn
 #!/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -385,11 +385,65 @@ USER=$2
 PASS=$3
 EXP=$4
 
-mkdir -p /etc/zivpn /etc/hysteria
-touch /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
+mkdir -p /etc/xray /etc/zivpn /etc/hysteria
+touch /etc/xray/trial-exp.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
 if ! pgrep -x "useradd" >/dev/null && ! pgrep -x "usermod" >/dev/null && ! pgrep -x "chpasswd" >/dev/null; then
     rm -f /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock /etc/.pwd.lock 2>/dev/null
+fi
+
+if [ "$ACTION" = "add_trial" ]; then
+    EXP_TS=$(echo "$EXP" | tr -cd '0-9')
+    if [ -z "$EXP_TS" ]; then
+        EXP_TS=$(( $(date +%s) + 3600 ))
+    fi
+    EXP_DATE=$(date -d "@$EXP_TS" +"%Y-%m-%d")
+    SHADOW_EXP=$(date -d "$EXP_DATE + 2 days" +"%Y-%m-%d")
+
+    for i in 1 2 3; do
+        if ! id "$USER" >/dev/null 2>&1; then
+            /usr/sbin/useradd -e "$SHADOW_EXP" -s /bin/false -M "$USER" 2>/dev/null || \
+            /usr/sbin/useradd -e "$SHADOW_EXP" -s /bin/false -M -N "$USER" 2>/dev/null
+            sleep 0.3
+        else
+            break
+        fi
+    done
+
+    if ! id "$USER" >/dev/null 2>&1; then
+        flock -u 200
+        exit 1
+    fi
+
+    echo "$USER:$PASS" | /usr/sbin/chpasswd 2>/dev/null
+    /usr/bin/chage -E "$SHADOW_EXP" "$USER" 2>/dev/null
+    /usr/sbin/usermod -e "$SHADOW_EXP" "$USER" 2>/dev/null
+
+    sed -i "/^${USER}:/d" /etc/xray/trial-exp.txt
+    echo "${USER}:${EXP_TS}" >> /etc/xray/trial-exp.txt
+
+    if [ -n "$PASS" ] && [ -f /etc/zivpn/config.json ]; then
+        jq --arg p "$PASS" '.auth.config += [$p] | .auth.config |= unique' /etc/zivpn/config.json > "/tmp/zivpn_tmp_$$.json"
+        if [ -s "/tmp/zivpn_tmp_$$.json" ]; then
+            mv "/tmp/zivpn_tmp_$$.json" /etc/zivpn/config.json
+        else
+            rm -f "/tmp/zivpn_tmp_$$.json"
+        fi
+        sed -i "/^${PASS}:/d" /etc/zivpn/zivpn-exp.txt
+        echo "${PASS}:${EXP_DATE}" >> /etc/zivpn/zivpn-exp.txt
+        sed -i "/^${USER}:/d" /etc/zivpn/zivpn-users.txt
+        echo "${USER}:${PASS}" >> /etc/zivpn/zivpn-users.txt
+        (systemctl restart zivpn >/dev/null 2>&1) 200>&- &
+    fi
+
+    if [ -n "$USER" ] && [ -n "$PASS" ]; then
+        sed -i "/^${USER}:/d" /etc/hysteria/hys-users.txt
+        echo "${USER}:${PASS}:${EXP_DATE}" >> /etc/hysteria/hys-users.txt
+        (/usr/bin/rebuild-hysteria >/dev/null 2>&1) 200>&- &
+    fi
+
+    flock -u 200
+    exit 0
 fi
 
 if ! echo "$EXP" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
@@ -419,6 +473,7 @@ if [ "$ACTION" = "add" ]; then
     echo "$USER:$PASS" | /usr/sbin/chpasswd 2>/dev/null
     /usr/bin/chage -E "$SHADOW_EXP" "$USER" 2>/dev/null
     /usr/sbin/usermod -e "$SHADOW_EXP" "$USER" 2>/dev/null
+    sed -i "/^${USER}:/d" /etc/xray/trial-exp.txt 2>/dev/null
 
     if [ -n "$PASS" ] && [ -f /etc/zivpn/config.json ]; then
         jq --arg p "$PASS" '.auth.config += [$p] | .auth.config |= unique' /etc/zivpn/config.json > "/tmp/zivpn_tmp_$$.json"
@@ -441,6 +496,7 @@ if [ "$ACTION" = "add" ]; then
     fi
 
 elif [ "$ACTION" = "renew" ]; then
+    sed -i "/^${USER}:/d" /etc/xray/trial-exp.txt 2>/dev/null
     ZPASS=$(grep "^${USER}:" /etc/zivpn/zivpn-users.txt | cut -d: -f2 | tail -n 1)
     HPASS=$(grep "^${USER}:" /etc/hysteria/hys-users.txt | cut -d: -f2 | tail -n 1)
     [ -z "$ZPASS" ] && [ -n "$PASS" ] && ZPASS="$PASS"
@@ -495,6 +551,7 @@ elif [ "$ACTION" = "renew" ]; then
     fi
 
 elif [ "$ACTION" = "delete" ]; then
+    sed -i "/^${USER}:/d" /etc/xray/trial-exp.txt 2>/dev/null
     /usr/bin/killall -u "$USER" 2>/dev/null
     /usr/sbin/userdel -f "$USER" 2>/dev/null
     /usr/sbin/groupdel "$USER" 2>/dev/null
@@ -544,6 +601,10 @@ fi
 
 get_user_exp() {
     local usr="$1"
+    local texp=$(grep "^${usr}:" /etc/xray/trial-exp.txt 2>/dev/null | cut -d: -f2 | tail -n 1)
+    if [ -n "$texp" ]; then
+        date -d "@$texp" "+%Y-%m-%d %H:%M (Trial)" 2>/dev/null && return
+    fi
     local hexp=$(grep "^${usr}:" /etc/hysteria/hys-users.txt 2>/dev/null | cut -d: -f3 | tail -n 1)
     if [ -n "$hexp" ]; then
         echo "$hexp"
@@ -678,7 +739,7 @@ case "$ACTION" in
         DAYS=$(echo "$3" | tr -cd '0-9')
         if [ -z "$USER" ]; then echo '{"success":false,"msg":"ไม่พบชื่อผู้ใช้"}'; exit 0; fi
         if [ -z "$DAYS" ]; then DAYS=30; fi
-        exp_old=$(get_user_exp "$USER")
+        exp_old=$(grep "^${USER}:" /etc/hysteria/hys-users.txt 2>/dev/null | cut -d: -f3 | tail -n 1)
         today_sec=$(date +%s)
         exp_sec=$(date -d "$exp_old" +%s 2>/dev/null)
         [ -z "$exp_sec" ] && exp_sec="$today_sec"
@@ -698,8 +759,8 @@ case "$ACTION" in
         PASS=$(echo "$3" | tr -cd 'a-zA-Z0-9_@#.-')
         if [ -z "$USER" ]; then echo '{"success":false,"msg":"ไม่พบชื่อผู้ใช้"}'; exit 0; fi
         if [ -z "$PASS" ]; then echo '{"success":false,"msg":"กรุณากรอกรหัสผ่าน"}'; exit 0; fi
-        EXP=$(get_user_exp "$USER")
-        if [ "$EXP" = "Never" ] || [ -z "$EXP" ]; then
+        EXP=$(grep "^${USER}:" /etc/hysteria/hys-users.txt 2>/dev/null | cut -d: -f3 | tail -n 1)
+        if [ -z "$EXP" ]; then
             EXP=$(date -d "30 days" +%Y-%m-%d)
         fi
         /usr/bin/api-vpn add "$USER" "$PASS" "$EXP" >/dev/null 2>&1
@@ -858,16 +919,17 @@ if (\$req_key !== \$secret_key) {
 }
 
 \$action = \$req['action'] ?? (\$req['act'] ?? 'add');
-if (in_array(\$action, ['add_zivpn', 'zivpn', 'create', 'add_ssh'])) {
+if (in_array(\$action, ['add_zivpn', 'zivpn', 'create', 'add_ssh', 'trial', 'add_trial'])) {
     \$action = 'add';
 }
 
 \$user = preg_replace('/[^a-zA-Z0-9_]/', '', \$req['user'] ?? (\$req['username'] ?? ''));
 \$pass = preg_replace('/[^a-zA-Z0-9_@#.-]/', '', \$req['pass'] ?? (\$req['password'] ?? (\$req['zpass'] ?? '')));
-\$days = intval(\$req['days'] ?? (\$req['day'] ?? 1));
+\$hours = intval(\$req['hours'] ?? (\$req['hour'] ?? 0));
+\$days = intval(\$req['days'] ?? (\$req['day'] ?? 0));
 
-if (\$days < 1) {
-    \$days = 1;
+if (!empty(\$req['is_trial']) || !empty(\$req['trial'])) {
+    if (\$hours < 1) { \$hours = 1; }
 }
 
 if (empty(\$user) && !empty(\$pass)) {
@@ -881,15 +943,29 @@ if (empty(\$user)) {
 }
 
 if (\$action === 'add') {
-    \$exp = date('Y-m-d', strtotime("+\$days days"));
-    exec("sudo /usr/bin/api-vpn add '\$user' '\$pass' '\$exp' 2>&1", \$out, \$ret);
-    exec("id -u '\$user' 2>/dev/null", \$id_out, \$id_ret);
-    if (\$id_ret === 0) {
-        echo json_encode(['success' => true, 'exp' => \$exp, 'user' => \$user, 'pass' => \$pass]);
+    if (\$hours > 0) {
+        \$exp_ts = time() + (\$hours * 3600);
+        \$exp_str = date('Y-m-d H:i', \$exp_ts);
+        exec("sudo /usr/bin/api-vpn add_trial '\$user' '\$pass' '\$exp_ts' 2>&1", \$out, \$ret);
+        exec("id -u '\$user' 2>/dev/null", \$id_out, \$id_ret);
+        if (\$id_ret === 0) {
+            echo json_encode(['success' => true, 'exp' => \$exp_str, 'expire_ts' => \$exp_ts, 'user' => \$user, 'pass' => \$pass]);
+        } else {
+            echo json_encode(['success' => false, 'msg' => 'Create trial user failed']);
+        }
     } else {
-        echo json_encode(['success' => false, 'msg' => 'Create user failed']);
+        if (\$days < 1) { \$days = 1; }
+        \$exp = date('Y-m-d', strtotime("+\$days days"));
+        exec("sudo /usr/bin/api-vpn add '\$user' '\$pass' '\$exp' 2>&1", \$out, \$ret);
+        exec("id -u '\$user' 2>/dev/null", \$id_out, \$id_ret);
+        if (\$id_ret === 0) {
+            echo json_encode(['success' => true, 'exp' => \$exp, 'user' => \$user, 'pass' => \$pass]);
+        } else {
+            echo json_encode(['success' => false, 'msg' => 'Create user failed']);
+        }
     }
 } elseif (\$action === 'renew') {
+    if (\$days < 1) { \$days = 1; }
     \$exp = date('Y-m-d', strtotime("+\$days days"));
     exec("sudo /usr/bin/api-vpn renew '\$user' '\$pass' '\$exp' 2>&1", \$out, \$ret);
     exec("id -u '\$user' 2>/dev/null", \$id_out, \$id_ret);
@@ -2062,7 +2138,7 @@ systemctl restart ws-epro
 
 # 13.5 ติดตั้ง Stunnel4 สำหรับโหมด SSL/TLS -> SSH (Direct SSL Port 443, 444, 777)
 mkdir -p /etc/stunnel /var/run/stunnel4
-cat /etc/xray/xray.crt /etc/xray/xray.key > /etc/stunnel/stunnel.pem
+printf "%s\n%s\n" "$(cat /etc/xray/xray.crt)" "$(cat /etc/xray/xray.key)" > /etc/stunnel/stunnel.pem
 chmod 600 /etc/stunnel/stunnel.pem
 
 cat << 'EOF' > /etc/stunnel/stunnel.conf
@@ -2095,6 +2171,7 @@ After=network.target
 
 [Service]
 Type=forking
+ExecStartPre=/bin/mkdir -p /var/run/stunnel4
 ExecStart=/usr/bin/stunnel4 /etc/stunnel/stunnel.conf
 PIDFile=/var/run/stunnel4/stunnel.pid
 Restart=always
@@ -2184,13 +2261,28 @@ fi
 EOF
 chmod +x /usr/bin/xp
 
-# 15. สร้างสคริปต์เตะคนล็อกอินซ้อน (tendang), ล้างขยะ (clear-log), สำรองข้อมูล (backup-vpn / restore-vpn)
+# 15. สร้างสคริปต์ลบตัวทดลองรายชั่วโมง + เตะล็อกอินซ้อน (tendang), ล้างขยะ (clear-log), สำรองข้อมูล (backup-vpn / restore-vpn)
 [ ! -f /etc/xray/limit-ssh ] && echo "2" > /etc/xray/limit-ssh
 [ ! -f /etc/xray/autoreboot-status ] && echo "เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)" > /etc/xray/autoreboot-status
 
 cat << 'EOF' > /usr/bin/tendang
 #!/bin/bash
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export TZ="Asia/Bangkok"
+
+# ตรวจสอบและลบบัญชีทดลองรายชั่วโมง (hours=1) ที่หมดเวลาทุก 1 นาที
+if [ -s /etc/xray/trial-exp.txt ]; then
+    NOW_TS=$(date +%s)
+    while IFS=':' read -r t_user t_exp; do
+        [ -z "$t_user" ] && continue
+        if [ -n "$t_exp" ] && [ "$NOW_TS" -ge "$t_exp" ]; then
+            /usr/bin/api-vpn delete "$t_user" "" "" >/dev/null 2>&1
+            sed -i "/^${t_user}:/d" /etc/xray/trial-exp.txt 2>/dev/null
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Deleted Expired Trial User: $t_user" >> /var/log/autokill.log
+        fi
+    done < /etc/xray/trial-exp.txt
+fi
+
 MAX=$(cat /etc/xray/limit-ssh 2>/dev/null)
 [ -z "$MAX" ] && MAX=2
 if [ "$MAX" -le 0 ]; then
@@ -2262,6 +2354,7 @@ done
 cp -f /etc/xray/config.json "$BACKUP_DIR/xray/" 2>/dev/null
 cp -f /etc/xray/xray-exp.txt "$BACKUP_DIR/xray/" 2>/dev/null
 cp -f /etc/xray/xray-lock.txt "$BACKUP_DIR/xray/" 2>/dev/null
+cp -f /etc/xray/trial-exp.txt "$BACKUP_DIR/xray/" 2>/dev/null
 cp -f /etc/xray/limit-ssh "$BACKUP_DIR/xray/" 2>/dev/null
 
 cp -f /etc/zivpn/config.json "$BACKUP_DIR/zivpn/" 2>/dev/null
@@ -2372,6 +2465,7 @@ mkdir -p /etc/xray
 [ -f "$RESTORE_DIR/xray/config.json" ] && cp -f "$RESTORE_DIR/xray/config.json" /etc/xray/config.json
 [ -f "$RESTORE_DIR/xray/xray-exp.txt" ] && cp -f "$RESTORE_DIR/xray/xray-exp.txt" /etc/xray/xray-exp.txt
 [ -f "$RESTORE_DIR/xray/xray-lock.txt" ] && cp -f "$RESTORE_DIR/xray/xray-lock.txt" /etc/xray/xray-lock.txt
+[ -f "$RESTORE_DIR/xray/trial-exp.txt" ] && cp -f "$RESTORE_DIR/xray/trial-exp.txt" /etc/xray/trial-exp.txt
 [ -f "$RESTORE_DIR/xray/limit-ssh" ] && cp -f "$RESTORE_DIR/xray/limit-ssh" /etc/xray/limit-ssh
 
 mkdir -p /etc/zivpn
@@ -2386,13 +2480,11 @@ if [ -f "$RESTORE_DIR/hysteria/hys-users.txt" ]; then
 fi
 
 if [ -f "$RESTORE_DIR/api/api_ssh.php" ]; then
-    mkdir -p /home/vps/public_html /root/vnext_api
-    cp -f "$RESTORE_DIR/api/api_ssh.php" /home/vps/public_html/api_ssh.php
-    sed -i '/date_default_timezone_set/d' /home/vps/public_html/api_ssh.php
-    sed -i 's/<?php/<?php\ndate_default_timezone_set("Asia\/Bangkok");/' /home/vps/public_html/api_ssh.php
-    cp -f "$RESTORE_DIR/api/api_ssh.php" /root/vnext_api/api_ssh.php
-    chown -R www-data:www-data /home/vps/public_html
-    chmod -R 755 /home/vps/public_html
+    SAVED_RESTORE_KEY=$(grep '$secret_key =' "$RESTORE_DIR/api/api_ssh.php" | cut -d'"' -f2)
+    if [ -n "$SAVED_RESTORE_KEY" ]; then
+        sed -i "s/\$secret_key = \".*\";/\$secret_key = \"${SAVED_RESTORE_KEY}\";/g" /home/vps/public_html/api_ssh.php
+        cp -f /home/vps/public_html/api_ssh.php /root/vnext_api/api_ssh.php
+    fi
 fi
 
 rm -rf "$RESTORE_ZIP" "$RESTORE_DIR"
@@ -2489,7 +2581,7 @@ REBOOT_STAT=$(cat /etc/xray/autoreboot-status 2>/dev/null)
 [ -z "$REBOOT_STAT" ] && REBOOT_STAT="เปิดใช้งาน (ทุกวัน เวลา 03:00 น.)"
 RAM_USAGE=$(free -m | awk 'NR==2{printf "%s/%s MB (%.1f%%)", $3,$2,$3*100/$2 }')
 mkdir -p /etc/xray /etc/zivpn /etc/hysteria
-touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
+touch /etc/xray/xray-exp.txt /etc/xray/xray-lock.txt /etc/xray/trial-exp.txt /etc/zivpn/zivpn-exp.txt /etc/zivpn/zivpn-users.txt /etc/hysteria/hys-users.txt
 
 clear
 echo -e "${YELLOW}☉———————————————————————————————————————————————☉${NC}"
@@ -2634,8 +2726,13 @@ case $opt in
         printf "%-18s %-20s %s\n" "Username" "Expire Date" "Status"
         echo -e "---------------------------------------------------"
         for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd | tac); do
-            exp=$(grep "^${user}:" /etc/hysteria/hys-users.txt 2>/dev/null | cut -d: -f3 | tail -n 1)
-            [ -z "$exp" ] && exp=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
+            texp=$(grep "^${user}:" /etc/xray/trial-exp.txt 2>/dev/null | cut -d: -f2 | tail -n 1)
+            if [ -n "$texp" ]; then
+                exp=$(date -d "@$texp" "+%Y-%m-%d %H:%M")
+            else
+                exp=$(grep "^${user}:" /etc/hysteria/hys-users.txt 2>/dev/null | cut -d: -f3 | tail -n 1)
+                [ -z "$exp" ] && exp=$(chage -l "$user" | grep "Account expires" | awk -F": " '{print $2}')
+            fi
             passwd_stat=$(passwd -S "$user" 2>/dev/null | awk '{print $2}')
             if [ "$passwd_stat" = "L" ]; then
                 stat="${RED}Locked${NC}"
@@ -3026,11 +3123,11 @@ JSON
             echo "ยังไม่มีข้อมูลการเชื่อมต่อ Xray"
         fi
 
-        echo -e "\n${YELLOW}=== ประวัติการเตะล็อกอินซ้อน 10 รายการล่าสุด ===${NC}"
+        echo -e "\n${YELLOW}=== ประวัติการเตะล็อกอินซ้อน / ลบตัวทดลอง 10 รายการล่าสุด ===${NC}"
         if [ -s /var/log/autokill.log ]; then
             tail -n 10 /var/log/autokill.log
         else
-            echo "ยังไม่มีประวัติการทำผิดกฎ"
+            echo "ยังไม่มีประวัติการทำงาน"
         fi
         echo -e "${YELLOW}===================================================${NC}"
         ;;
@@ -3053,7 +3150,7 @@ JSON
         /root/.acme.sh/acme.sh --installcert -d "${newdom}" \
             --fullchainpath /etc/xray/xray.crt \
             --keypath /etc/xray/xray.key --ecc
-        cat /etc/xray/xray.crt /etc/xray/xray.key > /etc/stunnel/stunnel.pem
+        printf "%s\n%s\n" "$(cat /etc/xray/xray.crt)" "$(cat /etc/xray/xray.key)" > /etc/stunnel/stunnel.pem
         chmod 600 /etc/stunnel/stunnel.pem
         systemctl start nginx
         systemctl restart stunnel4 xray hysteria
